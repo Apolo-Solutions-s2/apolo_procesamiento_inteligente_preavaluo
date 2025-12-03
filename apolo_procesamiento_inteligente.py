@@ -1,20 +1,75 @@
 import os
+import json
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flask import jsonify
 import functions_framework
 from google.cloud import storage
 
-# Logging
+# ─────────────────────────────────────────────────────────────
+# Logging base (stdout/stderr -> Cloud Logging en Run/Functions)
+# ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, force=True)
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_prefix(prefix: str) -> str:
+    p = (prefix or "").strip()
+    if p and not p.endswith("/"):
+        p += "/"
+    return p
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        v = int(value)
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
+def _log_progress(
+    *,
+    run_id: str,
+    preavaluo_id: str,
+    bucket: str,
+    folder_prefix: str,
+    step: str,
+    percent: int,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Emite un log en formato JSON (texto) para poder consultarlo y parsearlo desde Cloud Logging.
+    Tu jefe puede luego calcular porcentaje leyendo el último evento por run_id.
+    """
+    payload: Dict[str, Any] = {
+        "event_type": "progress",
+        "ts_utc": _utc_iso(),
+        "run_id": run_id,
+        "preavaluo_id": preavaluo_id,
+        "bucket": bucket,
+        "folder_prefix": folder_prefix,
+        "step": step,
+        "percent": int(percent),
+    }
+    if extra:
+        payload.update(extra)
+
+    # JSON “estable” para que sea fácil de buscar/parsear.
+    logging.info(json.dumps(payload, ensure_ascii=False))
+
 
 # ─────────────────────────────────────────────────────────────
 # Simuladores
 # ─────────────────────────────────────────────────────────────
-def simulate_classification(file_name: str) -> dict:
+def simulate_classification(file_name: str) -> Dict[str, Any]:
     categories = ["EstadoDeResultados", "BalanceGeneral", "RegistrosPatronales"]
     return {
         "document_type": random.choice(categories),
@@ -22,7 +77,7 @@ def simulate_classification(file_name: str) -> dict:
     }
 
 
-def simulate_extraction(file_name: str, category: str) -> dict:
+def simulate_extraction(file_name: str, category: str) -> Dict[str, Any]:
     if category == "RegistrosPatronales":
         fields = {
             "Empresa": "Empresa XYZ",
@@ -46,31 +101,24 @@ def simulate_extraction(file_name: str, category: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-# Helpers GCS
+# GCS helpers
 # ─────────────────────────────────────────────────────────────
-def _normalize_prefix(prefix: str) -> str:
-    prefix = (prefix or "").strip()
-    if prefix and not prefix.endswith("/"):
-        prefix += "/"
-    return prefix
-
-
-def _list_objects(bucket_name: str, prefix: str, allowed_exts: set[str], max_items: int) -> list[str]:
+def _list_object_names(
+    bucket_name: str,
+    prefix: str,
+    allowed_exts: Set[str],
+    max_items: int,
+) -> List[str]:
     client = storage.Client()
-    bucket = client.bucket(bucket_name)
+    names: List[str] = []
 
-    names: list[str] = []
-    # list_blobs maneja paginación internamente
-    for blob in client.list_blobs(bucket, prefix=prefix):
-        name = blob.name or ""
+    for blob in client.list_blobs(bucket_name, prefix=prefix):
+        name = (blob.name or "").strip()
         if not name:
             continue
-
-        # Si es "carpeta placeholder" (termina en /) lo ignoramos
-        if name.endswith("/"):
+        if name.endswith("/"):  # “carpeta” placeholder
             continue
 
-        # Filtrado por extensión
         lower = name.lower()
         if allowed_exts and not any(lower.endswith(ext) for ext in allowed_exts):
             continue
@@ -83,7 +131,7 @@ def _list_objects(bucket_name: str, prefix: str, allowed_exts: set[str], max_ite
 
 
 # ─────────────────────────────────────────────────────────────
-# Entry
+# Entry point
 # ─────────────────────────────────────────────────────────────
 @functions_framework.http
 def document_processor(request):
@@ -91,68 +139,196 @@ def document_processor(request):
         return jsonify({"error": "Method not allowed"}), 405
 
     data = request.get_json(silent=True) or {}
+
+    # Inputs
     folder_prefix = _normalize_prefix(data.get("folder_prefix", ""))
-
-    # Bucket por env var (recomendado) o default fijo
-    bucket_name = os.environ.get("BUCKET_NAME", "preavaluos-pdf")
-
-    # Preavaluo: si no viene explícito, lo inferimos del primer segmento del prefix
-    preavaluo_id = data.get("preavaluo_id") or (folder_prefix.split("/")[0] if folder_prefix else "SIM-000")
-
-    # Extensiones permitidas (opcional en request)
-    # Ej: {"extensions": [".pdf", ".xml"]}
-    extensions = data.get("extensions") or [".pdf"]
-    allowed_exts = {str(x).lower().strip() for x in extensions if str(x).strip()}
-    max_items = int(data.get("max_items") or 500)
-
     if not folder_prefix:
         return jsonify({"error": "folder_prefix is required"}), 400
 
-    logging.info("Incoming event: %s", data)
-    logging.info("Bucket=%s Prefix=%s Preavaluo=%s", bucket_name, folder_prefix, preavaluo_id)
+    bucket_name = os.environ.get("BUCKET_NAME", "preavaluos-pdf")
 
-    # 1) Listar objetos en el bucket bajo el prefix
+    # Correlación (ideal: el workflow te manda workflow_execution_id)
+    run_id = (
+        str(data.get("workflow_execution_id") or "").strip()
+        or str(data.get("run_id") or "").strip()
+        or f"run-{int(time.time())}"
+    )
+
+    # preavaluo_id: si no viene, lo inferimos del primer segmento del prefix
+    preavaluo_id = str(data.get("preavaluo_id") or "").strip()
+    if not preavaluo_id:
+        preavaluo_id = folder_prefix.split("/")[0] if folder_prefix else "SIM-000"
+
+    # Extensiones a incluir (por default PDFs)
+    extensions = data.get("extensions") or [".pdf"]
+    allowed_exts = {str(x).lower().strip() for x in extensions if str(x).strip()}
+
+    max_items = _safe_int(data.get("max_items"), default=500)
+
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="START",
+        percent=0,
+    )
+
+    # 20%: entrando / preparando listado
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="LIST_BUCKET_START",
+        percent=20,
+        extra={"max_items": max_items, "extensions": sorted(list(allowed_exts))},
+    )
+
     try:
-        object_names = _list_objects(bucket_name, folder_prefix, allowed_exts, max_items)
+        object_names = _list_object_names(bucket_name, folder_prefix, allowed_exts, max_items)
     except Exception as e:
         logging.exception("GCS list failed")
+        _log_progress(
+            run_id=run_id,
+            preavaluo_id=preavaluo_id,
+            bucket=bucket_name,
+            folder_prefix=folder_prefix,
+            step="LIST_BUCKET_ERROR",
+            percent=20,
+            extra={"error": str(e)},
+        )
         return jsonify({"error": "Failed to list objects", "details": str(e)}), 500
 
-    if not object_names:
+    total_files = len(object_names)
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="LIST_BUCKET_DONE",
+        percent=20,
+        extra={"total_files": total_files},
+    )
+
+    if total_files == 0:
+        _log_progress(
+            run_id=run_id,
+            preavaluo_id=preavaluo_id,
+            bucket=bucket_name,
+            folder_prefix=folder_prefix,
+            step="DONE_NO_FILES",
+            percent=100,
+        )
         return jsonify({
             "status": "no_files",
+            "run_id": run_id,
             "preavaluo_id": preavaluo_id,
             "bucket": bucket_name,
             "folder_prefix": folder_prefix,
             "document_count": 0,
-            "results": []
+            "results": [],
         }), 200
 
-    # 2) Simulación por archivo
-    results = []
-    total_files = len(object_names)
+    # 40%: iniciar clasificación
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="CLASSIFY_START",
+        percent=40,
+        extra={"total_files": total_files},
+    )
 
-    logging.info("Found %d objects to process.", total_files)
+    classifications: Dict[str, Dict[str, Any]] = {}
+    for idx, name in enumerate(object_names, start=1):
+        classifications[name] = simulate_classification(name)
+        # Log opcional por archivo (no cambia el percent “hito”)
+        logging.info(json.dumps({
+            "event_type": "progress_detail",
+            "ts_utc": _utc_iso(),
+            "run_id": run_id,
+            "step": "CLASSIFY_ITEM",
+            "current_file": idx,
+            "total_files": total_files,
+            "file_name": name,
+        }, ensure_ascii=False))
+        time.sleep(0.05)
 
-    for idx, file_name in enumerate(object_names, start=1):
-        classification = simulate_classification(file_name)
-        extraction = simulate_extraction(file_name, classification["document_type"])
+    # 60%: clasificación terminada
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="CLASSIFY_DONE",
+        percent=60,
+        extra={"total_files": total_files},
+    )
 
+    # 70%: iniciar extracción
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="EXTRACT_START",
+        percent=70,
+        extra={"total_files": total_files},
+    )
+
+    results: List[Dict[str, Any]] = []
+    for idx, name in enumerate(object_names, start=1):
+        c = classifications[name]
+        e = simulate_extraction(name, c["document_type"])
         results.append({
-            "file_name": file_name,
-            "gcs_uri": f"gs://{bucket_name}/{file_name}",
-            "classification": classification,
-            "extraction": extraction,
+            "file_name": name,
+            "gcs_uri": f"gs://{bucket_name}/{name}",
+            "classification": c,
+            "extraction": e,
             "processed_at": datetime.utcnow().isoformat(),
         })
 
-        progress_pct = round((idx / total_files) * 100.0, 2)
-        logging.info("Processed %s (%d/%d) -> %s%%", file_name, idx, total_files, progress_pct)
+        logging.info(json.dumps({
+            "event_type": "progress_detail",
+            "ts_utc": _utc_iso(),
+            "run_id": run_id,
+            "step": "EXTRACT_ITEM",
+            "current_file": idx,
+            "total_files": total_files,
+            "file_name": name,
+        }, ensure_ascii=False))
+        time.sleep(0.05)
 
-        time.sleep(0.2)  # simulación
+    # 80%: extracción terminada
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="EXTRACT_DONE",
+        percent=80,
+        extra={"total_files": total_files},
+    )
+
+    # (simula “empaquetado/finalización”)
+    time.sleep(0.05)
+
+    # 100%: proceso finalizado
+    _log_progress(
+        run_id=run_id,
+        preavaluo_id=preavaluo_id,
+        bucket=bucket_name,
+        folder_prefix=folder_prefix,
+        step="DONE",
+        percent=100,
+        extra={"document_count": total_files},
+    )
 
     return jsonify({
         "status": "processed",
+        "run_id": run_id,
         "preavaluo_id": preavaluo_id,
         "bucket": bucket_name,
         "folder_prefix": folder_prefix,
