@@ -19,17 +19,8 @@ build/
 Thumbs.db
 .DS_Store
 
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-.terraform.lock.hcl
-*.tfvars
-crash.log
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
+# Terraform (excluir toda la carpeta)
+terraform/
 
 # Sensitive
 .env.local
