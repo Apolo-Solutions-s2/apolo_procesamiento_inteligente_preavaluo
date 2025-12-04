@@ -503,6 +503,102 @@ def _persist_result(
 
 
 # ─────────────────────────────────────────────────────────────
+# Procesamiento de un solo documento
+# ─────────────────────────────────────────────────────────────
+def _process_single_document(
+    *,
+    storage_client: storage.Client,
+    db: firestore.Client,
+    run_id: str,
+    bucket_name: str,
+    blob_name: str,
+    folio_id: str,
+    file_id: str,
+) -> Dict[str, Any]:
+    """
+    Procesa un documento individual: clasificación + extracción + persistencia.
+    
+    Returns:
+        Dict con status, classification, extraction, from_cache, etc.
+    """
+    # Generar docId único basado en folio y archivo
+    doc_id = _generate_doc_id(folio_id, file_id)
+    
+    # Verificar idempotencia y lease
+    cached_result = _check_and_acquire_lease(
+        db=db,
+        run_id=run_id,
+        doc_id=doc_id,
+        folio_id=folio_id,
+        file_id=file_id,
+    )
+    
+    if cached_result:
+        # Ya está procesado - retornar desde cache
+        return {
+            "file_name": file_id,
+            "status": "processed",
+            "from_cache": True,
+            "classification": cached_result.get("classification", {}),
+            "extraction": cached_result.get("extraction", {}),
+        }
+    
+    # Procesar el documento
+    try:
+        # Obtener blob de GCS
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        
+        if not blob.exists():
+            raise AppError(
+                code="BLOB_NOT_FOUND",
+                message=f"Blob not found: {blob_name}",
+                stage="DOWNLOAD",
+                details={"bucket": bucket_name, "blob": blob_name},
+            )
+        
+        # 1. Clasificación
+        classification = simulate_classification(file_id)
+        
+        # 2. Extracción
+        extraction = simulate_extraction(
+            file_name=file_id,
+            document_type=classification.get("documentType", "UNKNOWN")
+        )
+        
+        # 3. Persistir resultado
+        _persist_result(
+            db=db,
+            run_id=run_id,
+            doc_id=doc_id,
+            folio_id=folio_id,
+            file_id=file_id,
+            gcs_uri=f"gs://{bucket_name}/{blob_name}",
+            classification=classification,
+            extraction=extraction,
+        )
+        
+        return {
+            "file_name": file_id,
+            "status": "processed",
+            "from_cache": False,
+            "classification": classification,
+            "extraction": extraction,
+        }
+        
+    except AppError:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing {file_id}: {e}")
+        raise AppError(
+            code="PROCESSING_ERROR",
+            message=f"Error processing document: {str(e)}",
+            stage="PROCESSING",
+            details={"file": file_id, "exception": str(e)},
+        )
+
+
+# ─────────────────────────────────────────────────────────────
 # GCS (blindado)
 # ─────────────────────────────────────────────────────────────
 def _list_object_names(
