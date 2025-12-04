@@ -19,8 +19,8 @@ build/
 Thumbs.db
 .DS_Store
 
-# Terraform (excluir toda la carpeta)
-terraform/
+# Terraform - allow infrastructure/ folder but exclude state files
+# (specific exclusions handled in infrastructure/terraform/.gitignore)
 
 # Sensitive
 .env.local
