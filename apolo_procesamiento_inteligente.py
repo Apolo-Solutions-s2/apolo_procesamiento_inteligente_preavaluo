@@ -14,6 +14,7 @@ from google.cloud import storage
 from google.cloud import firestore
 
 logging.basicConfig(level=logging.INFO, force=True)
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────
