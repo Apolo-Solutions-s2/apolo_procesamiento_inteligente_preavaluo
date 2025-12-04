@@ -35,5 +35,6 @@ ENV PORT=8080
 # Comando para iniciar la aplicación
 CMD exec functions-framework \
     --target=document_processor \
+    --source=apolo_procesamiento_inteligente.py \
     --signature-type=http \
     --port=$PORT
