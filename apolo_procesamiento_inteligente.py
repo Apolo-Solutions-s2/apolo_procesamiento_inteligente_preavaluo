@@ -1,3 +1,18 @@
+"""
+Apolo Document Processing Microservice
+
+Architectural Overview:
+- Serverless Cloud Run service for financial document intelligence
+- Designed for dual invocation: direct HTTP or orchestrated via Cloud Workflows
+- Implements idempotency through Firestore to prevent duplicate processing costs
+- Bridges storage (GCS) with AI processing (Document AI ready) and persistence (Firestore)
+
+Integration Patterns:
+- Mode 1: Direct HTTP invocation for simple client integration
+- Mode 2: Cloud Workflows orchestration for complex flows with retries and OIDC auth
+- Supports both individual document processing and batch folder operations
+"""
+
 import os
 import json
 import uuid
@@ -17,9 +32,10 @@ logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────
-# Error model (para devolver 500 con código específico)
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# DOMAIN MODEL: Error handling strategy ensures all failures return structured
+# error responses (HTTP 500) with specific error codes for client debugging
+# ═════════════════════════════════════════════════════════════════════════════
 class AppError(Exception):
     def __init__(
         self,
@@ -36,9 +52,10 @@ class AppError(Exception):
         self.details = details or {}
 
 
-# ─────────────────────────────────────────────────────────────
-# Utils
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# UTILITIES: Defensive programming layer that normalizes external inputs and
+# generates deterministic identifiers for traceability across distributed systems
+# ═════════════════════════════════════════════════════════════════════════════
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -63,7 +80,9 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 def _make_run_id(data: Dict[str, Any]) -> str:
-    # Preferimos correlacionar con workflow_execution_id si existe
+    """Establishes correlation ID strategy: reuse workflow execution ID when orchestrated,
+    generate unique ID for direct invocations. Enables end-to-end traceability across
+    microservices and workflow engines."""
     v = str(data.get("workflow_execution_id", "") or "").strip()
     if v:
         return v
@@ -71,13 +90,17 @@ def _make_run_id(data: Dict[str, Any]) -> str:
 
 
 def _make_doc_id(folio_id: str, file_id: str) -> str:
-    """Genera un ID único y determinístico para el documento."""
+    """Generates deterministic document identifier through content-based hashing.
+    Critical for idempotency: same document always produces same ID, enabling
+    deduplication checks in Firestore to avoid reprocessing costs."""
     combined = f"{folio_id}:{file_id}"
     return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
 
 def _is_valid_pdf(blob_name: str, storage_client: storage.Client, bucket_name: str) -> Tuple[bool, str]:
-    """Valida si un objeto en GCS es un PDF válido leyendo sus magic bytes.
+    """Early validation gate to prevent expensive Document AI processing on invalid files.
+    Uses magic byte inspection (PDF header signature) to fail fast before AI invocation,
+    reducing costs and providing clear client feedback.
     
     Returns:
         Tuple[bool, str]: (es_valido, mensaje_error)
@@ -108,7 +131,9 @@ def _infer_preavaluo_id(folder_prefix: str, provided: Any) -> str:
 
 
 def _json_log(payload: Dict[str, Any]) -> None:
-    # Log estructurado como JSON en textPayload
+    """Structured logging strategy for Cloud Logging integration. JSON format enables
+    querying, filtering, and correlation in GCP's observability stack. Critical for
+    debugging distributed workflows and tracking document processing lifecycle."""
     logging.info(json.dumps(payload, ensure_ascii=False))
 
 
@@ -149,6 +174,9 @@ def _error_response(
     details: Optional[Dict[str, Any]] = None,
     partial_results: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Any, int]:
+    """Standardized error contract for client integration. Always returns HTTP 500
+    with structured error metadata including stage, code, and partial results.
+    Design enables clients to implement granular retry logic and debugging."""
     body: Dict[str, Any] = {
         "status": "error",
         "run_id": run_id,
@@ -189,11 +217,15 @@ def _success_response(
     return jsonify(body), 200
 
 
-# ─────────────────────────────────────────────────────────────
-# Simuladores Document AI (blindados: no deben lanzar)
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# DOCUMENT AI SIMULATION LAYER: Decouples business logic from AI service integration.
+# These functions simulate Document AI's classifier and extractor APIs, enabling
+# development, testing, and cost estimation without production AI calls. Designed as
+# drop-in replacements - swap with real Document AI client calls in production.
+# Fail-safe design: never throws exceptions to ensure pipeline resilience.
+# ═════════════════════════════════════════════════════════════════════════════
 def simulate_classification(file_name: str) -> Dict[str, Any]:
-    """Simula clasificador de Document AI con 3 categorías de estados financieros.
+    """Simulates Document AI's classification processor for financial statement categorization.
     
     Categorías:
     - ESTADO_RESULTADOS: Estado de Resultados / Profit & Loss
@@ -217,13 +249,14 @@ def simulate_classification(file_name: str) -> Dict[str, Any]:
 
 
 def simulate_extraction(file_name: str, category: str) -> Dict[str, Any]:
-    """Simula extractor de Document AI según el tipo de documento clasificado.
+    """Simulates Document AI's custom extraction processor with schema-aligned output.
     
-    Extrae campos estructurados según el esquema de Document AI:
-    - LINE_ITEM_NAME, LINE_ITEM_VALUE, COLUMN_YEAR
-    - SECTION_HEADER, TOTAL_LABEL, CURRENCY, UNITS_SCALE
-    - REPORTING_PERIOD, ORG_NAME, STATEMENT_TITLE
-    - TABLE_COLUMN_HEADER, TABLE_ROW_REF, TABLE_CELL_REF
+    Business Context: Produces realistic financial statement data matching Document AI's
+    entity extraction format. The schema mirrors production output structure, ensuring
+    downstream consumers (analytics, validation logic) work identically in dev/prod.
+    
+    Design: Type-specific field generation maintains referential integrity (e.g.,
+    balance sheet assets = liabilities + equity) for realistic test scenarios.
     """
     try:
         # Campos comunes para todos los documentos
@@ -310,9 +343,14 @@ def simulate_extraction(file_name: str, category: str) -> Dict[str, Any]:
         return {"fields": {}, "metadata": {"decision_path": "SIMULATED_ERROR", "error": str(e)}}
 
 
-# ─────────────────────────────────────────────────────────────
-# Firestore (persistencia e idempotencia)
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# FIRESTORE PERSISTENCE LAYER: Implements idempotency and state management through
+# a hierarchical document model (runs > documents). Critical for:
+# - Cost optimization: prevents reprocessing of already-analyzed documents
+# - Auditability: maintains complete processing history with timestamps
+# - Resilience: enables recovery from partial failures without data loss
+# - Scalability: supports concurrent processing with lease-based coordination
+# ═════════════════════════════════════════════════════════════════════════════
 def _get_firestore_client() -> firestore.Client:
     """Obtiene cliente de Firestore con la base de datos configurada."""
     database_id = os.environ.get("FIRESTORE_DATABASE", "(default)")
@@ -326,7 +364,11 @@ def _ensure_run_document(
     bucket_name: str,
     folder_prefix: str,
 ) -> None:
-    """Crea o actualiza el documento de corrimiento (run) en Firestore.
+    """Establishes processing batch context in Firestore for aggregate tracking.
+    
+    Business Purpose: Groups related document processing operations under a single
+    run entity, enabling batch-level metrics (total/processed/failed counts) and
+    status tracking. Critical for client dashboards and workflow orchestration.
     
     Estructura: runs/{runId}
     """
@@ -366,12 +408,15 @@ def _check_and_acquire_lease(
     file_id: str,
     gcs_uri: str,
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
-    """Verifica si el documento ya fue procesado o adquiere lease para procesarlo.
+    """Implements distributed idempotency through optimistic concurrency control.
     
-    Estructura: runs/{runId}/documents/{docId}
+    Business Logic: Prevents duplicate Document AI processing costs by checking Firestore
+    cache before invoking AI services. Uses time-based lease expiration (10 min) to
+    handle stale locks from crashed processes. Fail-open design ensures availability
+    over strict consistency.
     
     Returns:
-        Tuple[bool, Optional[Dict]]: (puede_procesar, resultado_existente)
+        Tuple[bool, Optional[Dict]]: (should_process, cached_result_if_exists)
     """
     try:
         doc_ref = db.collection("runs").document(run_id).collection("documents").document(doc_id)
@@ -430,7 +475,12 @@ def _persist_result(
     status: str = "completed",
     error: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Persiste el resultado del procesamiento Document AI en Firestore.
+    """Atomic persistence of complete Document AI processing results for auditability.
+    
+    Architecture: Stores full classification + extraction output in hierarchical Firestore
+    structure. Enables future queries for analytics, reprocessing decisions, and
+    compliance audits. Updates aggregate run-level counters for dashboard integration.
+    Non-throwing design ensures processing pipeline continues even if persistence fails.
     
     Estructura jerárquica:
     runs/{runId}/documents/{docId}
@@ -502,9 +552,12 @@ def _persist_result(
         # No levantamos excepción para no fallar el procesamiento completo
 
 
-# ─────────────────────────────────────────────────────────────
-# Procesamiento de un solo documento
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# CORE PROCESSING PIPELINE: Orchestrates the complete document intelligence workflow
+# for a single document. Implements the idempotency check -> AI processing ->
+# persistence pattern. Designed as the atomic unit of work for both individual and
+# batch processing modes.
+# ═════════════════════════════════════════════════════════════════════════════
 def _process_single_document(
     *,
     storage_client: storage.Client,
@@ -516,7 +569,7 @@ def _process_single_document(
     file_id: str,
 ) -> Dict[str, Any]:
     """
-    Procesa un documento individual: clasificación + extracción + persistencia.
+    Executes the full document intelligence pipeline with idempotency protection.
     
     Returns:
         Dict con status, classification, extraction, from_cache, etc.
@@ -602,9 +655,12 @@ def _process_single_document(
         )
 
 
-# ─────────────────────────────────────────────────────────────
-# GCS (blindado)
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# GCS INTEGRATION LAYER: Abstracts Google Cloud Storage operations with fail-fast
+# error handling. Implements filtering and pagination to prevent runaway costs from
+# large buckets. Converts GCS exceptions to domain-specific AppErrors for consistent
+# client error handling.
+# ═════════════════════════════════════════════════════════════════════════════
 def _list_object_names(
     *,
     bucket_name: str,
@@ -612,6 +668,9 @@ def _list_object_names(
     allowed_exts: Set[str],
     max_items: int,
 ) -> List[str]:
+    """Discovers documents in GCS bucket with extension filtering and size limits.
+    Critical for batch processing: max_items prevents accidental processing of
+    entire large buckets that could exhaust quotas or budget."""
     # Si algo falla aquí, levantamos AppError con código específico
     try:
         client = storage.Client()
@@ -647,11 +706,19 @@ def _list_object_names(
         )
 
 
-# ─────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# HTTP ENTRY POINT: Main request handler supporting three invocation modes:
+# 1. Batch processing with fileList (Document AI native format)
+# 2. Individual document via gcs_pdf_uri (workflow integration)
+# 3. Folder batch via folder_prefix (legacy support)
+#
+# Architecture: Designed for dual deployment as standalone HTTP service or as
+# Cloud Workflows step. Comprehensive error handling ensures all code paths return
+# structured JSON (success: 200, all errors: 500 with error codes).
+# ═════════════════════════════════════════════════════════════════════════════
 @functions_framework.http
 def document_processor(request: Any):
+    """Main request handler orchestrating document intelligence pipeline across all modes."""
     # Defaults para que SIEMPRE podamos responder con forma estable
     bucket_name = os.environ.get("BUCKET_NAME", "preavaluos-pdf")
     folder_prefix = ""
@@ -692,7 +759,7 @@ def document_processor(request: Any):
         folder_prefix = _normalize_prefix(data.get("folder_prefix", ""))
         preavaluo_id = data.get("preavaluo_id") or folio_id or _infer_preavaluo_id(folder_prefix, data.get("preavaluo_id"))
 
-        # Logs iniciales
+        # Establish observability baseline for request tracking
         _log_progress(
             run_id=run_id,
             preavaluo_id=preavaluo_id,
@@ -702,11 +769,12 @@ def document_processor(request: Any):
             percent=0,
         )
 
-        # Validación (regla: error=>500)
-        # Tres modos: 
-        # 1) Nuevo formato batch: fileList
-        # 2) Individual: gcs_pdf_uri
-        # 3) Batch legacy: folder_prefix
+        # ─────────────────────────────────────────────────────────────────────
+        # Request routing logic: supports three invocation patterns for flexibility
+        # 1) fileList: Document AI batch format (production standard)
+        # 2) gcs_pdf_uri: single document for workflow integration
+        # 3) folder_prefix: batch discovery mode for folder scanning
+        # ─────────────────────────────────────────────────────────────────────
         if not file_list and not gcs_pdf_uri and not folder_prefix:
             raise AppError(
                 code="MISSING_REQUIRED_PARAMS",
@@ -731,7 +799,12 @@ def document_processor(request: Any):
         # Crear/actualizar documento de run en Firestore
         _ensure_run_document(db, run_id, preavaluo_id, bucket_name, folder_prefix)
         
-        # Modo 1: fileList (nuevo formato Document AI)
+        # ═════════════════════════════════════════════════════════════════════════
+        # MODE 1: Document AI Batch Processing (Production Pattern)
+        # Processes pre-specified list of documents, enabling integration with
+        # Document AI Batch API and external orchestration systems. Each document
+        # processed independently with individual error handling for partial success.
+        # ═════════════════════════════════════════════════════════════════════════
         if file_list:
             if not isinstance(file_list, list):
                 raise AppError(
@@ -807,7 +880,11 @@ def document_processor(request: Any):
                 "results": results,
             }), 200
         
-        # Modo 2: Individual con gcs_pdf_uri (legacy)
+        # ═════════════════════════════════════════════════════════════════════════
+        # MODE 2: Individual Document Processing (Workflow Integration)
+        # Direct processing of single document specified by GCS URI. Optimized for
+        # Cloud Workflows orchestration where each workflow step processes one document.
+        # ═════════════════════════════════════════════════════════════════════════
         elif gcs_pdf_uri:
             # Extraer bucket y blob name de gs://bucket/path/file.pdf
             if not gcs_pdf_uri.startswith("gs://"):
@@ -832,7 +909,12 @@ def document_processor(request: Any):
             object_names = [blob_name]
             
         else:
-            # Modo batch: listar archivos del folder
+            # ═════════════════════════════════════════════════════════════════════════
+            # MODE 3: Folder Discovery (Legacy Batch Support)
+            # Lists all documents in GCS folder prefix for processing. Useful for
+            # bulk processing scenarios where document list isn't pre-determined.
+            # Includes extension filtering and size limits for cost control.
+            # ═════════════════════════════════════════════════════════════════════════
             extensions = data.get("extensions") or [".pdf"]
             allowed_exts = {str(x).lower().strip() for x in extensions if str(x).strip()}
             max_items = _safe_int(data.get("max_items"), default=500)
@@ -885,7 +967,11 @@ def document_processor(request: Any):
                 status="no_files",
             )
 
-        # 30%: validación de PDFs
+        # ─────────────────────────────────────────────────────────────────────
+        # PDF Validation Gate: fail-fast strategy to prevent expensive AI processing
+        # on corrupt or non-PDF files. Magic byte inspection is cheap; Document AI
+        # processing is expensive. Early rejection provides clear client feedback.
+        # ─────────────────────────────────────────────────────────────────────
         _log_progress(
             run_id=run_id,
             preavaluo_id=preavaluo_id,
@@ -941,7 +1027,11 @@ def document_processor(request: Any):
                 details={"invalid_files": invalid_files},
             )
 
-        # 40%: clasificación
+        # ─────────────────────────────────────────────────────────────────────
+        # Classification Phase: determines document type (Income Statement, Balance
+        # Sheet, Cash Flow) to route to appropriate extraction processor. In production,
+        # this invokes Document AI Classifier; currently simulated for development.
+        # ─────────────────────────────────────────────────────────────────────
         _log_progress(
             run_id=run_id,
             preavaluo_id=preavaluo_id,
@@ -988,7 +1078,12 @@ def document_processor(request: Any):
             extra={"total_files": len(valid_pdfs)},
         )
 
-        # 70%: extracción y persistencia
+        # ─────────────────────────────────────────────────────────────────────
+        # Extraction & Persistence Phase: core intelligence pipeline that extracts
+        # structured data from documents and persists to Firestore. Implements
+        # idempotency checks to leverage cached results. Per-document error handling
+        # ensures partial batch success rather than all-or-nothing failures.
+        # ─────────────────────────────────────────────────────────────────────
         _log_progress(
             run_id=run_id,
             preavaluo_id=preavaluo_id,
@@ -1118,7 +1213,12 @@ def document_processor(request: Any):
             extra={"total_files": total_files},
         )
 
-        # 100% done - Actualizar run a completado
+        # ─────────────────────────────────────────────────────────────────────
+        # Finalization: update run-level status for dashboard integration and
+        # determine response code. Partial failures return 500 (client should inspect
+        # results array) while complete success returns 200. Non-critical errors in
+        # status update don't fail the entire operation (eventual consistency).
+        # ─────────────────────────────────────────────────────────────────────
         try:
             run_ref = db.collection("runs").document(run_id)
             run_ref.update({

@@ -1,103 +1,476 @@
-# Apolo - Procesamiento Inteligente de Documentos Financieros
+# Apolo - Financial Document Processing Service
 
-Solución de procesamiento inteligente de documentos financieros para **Apolo Solutions**.
+Intelligent document processing microservice for financial statement analysis.
 
-## 📋 Descripción
+## Overview
 
-**Propósito**
-Cloud Function que procesa documentos financieros desde Google Cloud Storage (GCS) para el módulo de preavalúos de Apolo. La función realiza tres etapas principales:
-- ✅ **Validación PDF**: Verifica que los archivos sean PDFs válidos mediante magic bytes
-- ✅ **Clasificación**: Identifica el tipo de documento (Estados de Resultados, Balance General, Registros Patronales)
-- ✅ **Extracción**: Extrae campos estructurados según el tipo de documento
-- ✅ **Persistencia**: Guarda resultados en Firestore con idempotencia
+Cloud Run service that processes PDF financial documents from Google Cloud Storage using a three-stage pipeline:
+1. **PDF Validation** - Verifies valid PDF format using magic byte inspection
+2. **Classification** - Identifies document type (Income Statement, Balance Sheet, Cash Flow)
+3. **Extraction** - Extracts structured financial data fields
+4. **Persistence** - Stores results in Firestore with idempotency
 
-**Contexto**
-Se ejecuta como Cloud Function (HTTP) serverless en GCP bajo el enfoque de orquestación con Cloud Workflows. La función valida, clasifica y extrae datos de documentos PDF, persistiendo resultados en Firestore para trazabilidad y evitar reprocesamiento.
+## Quick Links
 
-## 🚀 Características Técnicas
+📚 **Documentation**
+- [Architecture Overview](Documentation/ARCHITECTURE.md) - System design and data flow
+- [Infrastructure Summary](Documentation/INFRASTRUCTURE.md) - Complete infrastructure details
+- [Deployment Checklist](Documentation/DEPLOYMENT_CHECKLIST.md) - Pre-deployment verification
+- [GCP Commands Reference](Documentation/GCP_COMMANDS.md) - Essential gcloud commands
+- [Firestore Schema](Documentation/FIRESTORE_SCHEMA.md) - Database structure
+- [Testing Guide](Documentation/TESTING.md) - Test procedures
+- [Quick Start](Documentation/QUICKSTART.md) - Get started in 5 minutes
 
-| Aspecto | Especificación |
-|--------|----------------|
-| **Tipo de Recurso** | Cloud Run (Containerizado) |
-| **Lenguaje** | Python 3.11+ |
-| **Framework** | Flask + functions-framework |
-| **Patrón de Invocación** | HTTP directo o vía Cloud Workflows (OIDC) |
-| **Región** | us-south1 (Dallas) - configurable |
-| **Almacenamiento** | Google Cloud Storage (GCS) |
-| **Base de Datos** | Cloud Firestore (persistencia e idempotencia) |
-| **Seguridad** | Service Account + OIDC (opcional con Workflows) |
+🚀 **Deployment**
+- [Terraform IaC](infrastructure/terraform/README.md) - Infrastructure as Code
+- [PowerShell Scripts](scripts/powershell/README.md) - Windows deployment
+- [Bash Scripts](scripts/bash/README.md) - Linux/Mac deployment
 
-### 🔄 Modos de Operación
+## Technical Specifications
 
-**Modo 1: Invocación Directa (Actual)**
+| Component | Technology | Version |
+|-----------|-----------|---------|
+| **Runtime** | Python | 3.11 |
+| **Framework** | Flask + functions-framework | 3.x |
+| **Platform** | Cloud Run (Gen 2) | Latest |
+| **Region** | us-south1 (Dallas) | - |
+| **Storage** | Cloud Storage | - |
+| **Database** | Firestore (Native mode) | - |
+| **Auth** | Service Account + OIDC | - |
+
+## Architecture
+
+### Deployment Modes
+
+**Mode 1: Direct HTTP Invocation**
 ```
-Cliente/Backend → HTTP POST → Cloud Run → GCS + Firestore
+Client → HTTP POST → Cloud Run → GCS + Firestore
 ```
-✅ Ideal para pruebas y desarrollo  
-✅ Integración directa en tu aplicación  
-✅ Control total de la lógica de llamada  
+✅ Simple integration  
+✅ Synchronous responses  
+✅ Ideal for development/testing  
 
-**Modo 2: Con Cloud Workflows (Producción)**
+**Mode 2: Cloud Workflows Orchestration**
 ```
-Cliente/Backend → Cloud Workflows → HTTP POST (OIDC) → Cloud Run → GCS + Firestore
+Client → Cloud Workflows → OIDC Auth → Cloud Run → GCS + Firestore
 ```
-✅ Orquestación de flujos complejos  
-✅ Reintentos automáticos con backoff  
-✅ Autenticación OIDC sin credenciales estáticas  
-✅ Trazabilidad completa del flujo  
+✅ Complex workflow orchestration  
+✅ Automatic retries with backoff  
+✅ Production-grade reliability  
 
-> **Nota**: El microservicio funciona en **ambos modos**. Cloud Workflows es opcional y se agregará en producción para orquestación avanzada.
+### Processing Modes
 
-## 📦 Dependencias Principales
+| Mode | Input | Use Case |
+|------|-------|----------|
+| **Individual** | Single `gcs_pdf_uri` | Process one document |
+| **Batch (List)** | Array of `fileList` | Document AI batch format |
+| **Batch (Folder)** | `folder_prefix` | Discover and process all PDFs in folder |
 
-- **functions-framework** (v3.x) - Para ejecutar como Cloud Function
-- **Flask** - Servidor HTTP
-- **google-cloud-storage** (v2.10.0+) - Para listar y acceder a objetos en GCS
-- **google-cloud-firestore** (v2.11.0+) - Para persistencia e idempotencia
+## API Contract
 
-## 🔍 Comportamiento Esperado
+### Request Format
 
-**Entrada (Request JSON) - Modo Individual**
+**Individual Document:**
 ```json
 {
   "folioId": "PRE-2025-001",
-  "fileId": "balance_general.pdf",
-  "gcs_pdf_uri": "gs://preavaluos-pdf/PRE-2025-001/balance_general.pdf",
-  "workflow_execution_id": "wf-abc123"
+  "fileId": "balance.pdf",
+  "gcs_pdf_uri": "gs://preavaluos-pdf/PRE-2025-001/balance.pdf",
+  "workflow_execution_id": "optional-correlation-id"
 }
 ```
 
-**Entrada (Request JSON) - Modo Batch**
+**Batch Processing (Folder):**
 ```json
 {
   "folder_prefix": "PRE-2025-001/",
   "preavaluo_id": "PRE-2025-001",
   "extensions": [".pdf"],
-  "max_items": 500,
-  "workflow_execution_id": "wf-abc123"
+  "max_items": 500
 }
 ```
 
-**Flujo de Ejecución**
-1. **Validación**: Verifica parámetros y formato de entrada
-2. **Listado** (modo batch): Lista archivos del folder especificado en GCS
-3. **Validación PDF**: Lee magic bytes (%PDF-) para confirmar formato válido
-4. **Idempotencia**: Verifica en Firestore si el documento ya fue procesado
-5. **Clasificación**: Identifica tipo de documento con simulador (preparado para Document AI)
-6. **Extracción**: Extrae campos estructurados según el tipo
-7. **Persistencia**: Guarda resultados en Firestore con metadata completa
-8. **Respuesta**: Retorna JSON con resultados de todos los documentos
-   - Registra progreso y timestamps UTC
-4. Retorna resultado consolidado con todos los documentos procesados
+**Batch Processing (File List):**
+```json
+{
+  "runId": "custom-run-id",
+  "fileList": [
+    {"gcsUri": "gs://bucket/file1.pdf", "file_name": "doc1.pdf"},
+    {"gcsUri": "gs://bucket/file2.pdf", "file_name": "doc2.pdf"}
+  ]
+}
+```
 
-**Salida (Response JSON) - Éxito**
+### Response Format
+
+**Success (HTTP 200):**
 ```json
 {
   "status": "processed",
   "run_id": "wf-abc123",
   "preavaluo_id": "PRE-2025-001",
   "bucket": "preavaluos-pdf",
-  "folder_prefix": "PRE-2025-001/",
+  "document_count": 2,
+  "processedCount": 2,
+  "failedCount": 0,
+  "results": [
+    {
+      "file_name": "balance.pdf",
+      "status": "processed",
+      "from_cache": false,
+      "classification": {
+        "documentType": "ESTADO_SITUACION_FINANCIERA",
+        "confidence": 0.95,
+        "classifierVersion": "v1"
+      },
+      "extraction": {
+        "fields": {
+          "ORG_NAME": "Apolo Solutions S.A.",
+          "REPORTING_PERIOD": "2024-12-31",
+          "CURRENCY": "MXN",
+          "line_items": [...]
+        },
+        "metadata": {...}
+      }
+    }
+  ]
+}
+```
+
+**Error (HTTP 500):**
+```json
+{
+  "status": "error",
+  "run_id": "wf-abc123",
+  "error": {
+    "stage": "VALIDATION",
+    "code": "INVALID_PDF_FORMAT",
+    "message": "Invalid PDF header",
+    "details": {...},
+    "ts_utc": "2025-12-04T10:30:00Z"
+  }
+}
+```
+
+## Document Types
+
+The service classifies financial documents into three categories:
+
+| Type | Description | Spanish Name |
+|------|-------------|--------------|
+| `ESTADO_RESULTADOS` | Income Statement / Profit & Loss | Estado de Resultados |
+| `ESTADO_SITUACION_FINANCIERA` | Balance Sheet | Balance General |
+| `ESTADO_FLUJOS_EFECTIVO` | Cash Flow Statement | Estado de Flujos de Efectivo |
+
+### Extracted Fields
+
+Each document type extracts specific structured fields:
+- **Common**: Organization name, reporting period, currency, units scale
+- **Line Items**: Account names, values, years, section headers, totals
+- **Metadata**: Page count, processor version, table references
+
+See [Firestore Schema](Documentation/FIRESTORE_SCHEMA.md) for complete field definitions.
+
+## Idempotency & Caching
+
+### Firestore Structure
+```
+firestore (database: apolo-preavaluos-dev)
+└── runs/
+    └── {runId}/
+        ├── status, documentCount, processedCount, failedCount
+        └── documents/
+            └── {docId}/  # SHA-256 hash of folioId:fileId
+                ├── classification
+                ├── extraction
+                └── status
+```
+
+### How It Works
+1. Generate deterministic `docId` from `folioId:fileId`
+2. Check Firestore for existing result
+3. If found and completed → return cached result (`from_cache: true`)
+4. If not found → process document and persist
+5. Lease mechanism prevents concurrent processing (10-minute timeout)
+
+**Benefits:**
+- Prevents duplicate processing costs
+- Instant responses for re-requested documents
+- Complete audit trail
+- Safe for retries
+
+## Deployment
+
+### Option 1: Automated Scripts (Recommended)
+
+**PowerShell (Windows):**
+```powershell
+cd scripts/powershell
+.\deploy-complete.ps1
+```
+
+**Bash (Linux/Mac/Cloud Shell):**
+```bash
+cd scripts/bash
+./deploy-cloudrun.sh
+```
+
+**Features:**
+- Enables required APIs
+- Creates GCS bucket and Firestore database
+- Builds and deploys container
+- Runs test suite
+- ~5-7 minutes end-to-end
+
+### Option 2: Terraform (Infrastructure as Code)
+
+```bash
+cd infrastructure/terraform
+terraform init
+terraform apply -var-file="env/dev.tfvars"
+```
+
+**See:** [Terraform README](infrastructure/terraform/README.md)
+
+### Option 3: Manual gcloud
+
+```bash
+# Deploy from source
+gcloud run deploy apolo-procesamiento-inteligente \
+  --source . \
+  --region us-south1 \
+  --set-env-vars BUCKET_NAME=preavaluos-pdf,FIRESTORE_DATABASE=apolo-preavaluos-dev
+
+# Or deploy from pre-built image
+gcloud run deploy apolo-procesamiento-inteligente \
+  --image gcr.io/PROJECT_ID/apolo-procesamiento-inteligente:latest \
+  --region us-south1
+```
+
+**See:** [GCP Commands Reference](Documentation/GCP_COMMANDS.md)
+
+## Testing
+
+### Quick Test
+```bash
+SERVICE_URL="https://your-service-url.run.app"
+
+curl -X POST "${SERVICE_URL}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "gcs_pdf_uri": "gs://preavaluos-pdf/test.pdf",
+    "folioId": "TEST-001",
+    "fileId": "test.pdf"
+  }'
+```
+
+### Test Suite
+```bash
+# PowerShell
+.\scripts\powershell\test-cloudrun.ps1
+
+# Bash
+./scripts/bash/test-cloudrun.sh
+```
+
+**See:** [Testing Guide](Documentation/TESTING.md) for comprehensive test scenarios
+
+## Monitoring
+
+### View Logs
+```bash
+gcloud logging tail "resource.type=cloud_run_revision"
+```
+
+### Error Logs Only
+```bash
+gcloud logging read "resource.type=cloud_run_revision AND severity>=ERROR" --limit 20
+```
+
+### Structured Log Format
+```json
+{
+  "event_type": "progress",
+  "ts_utc": "2025-12-04T10:30:00Z",
+  "run_id": "wf-abc123",
+  "step": "CLASSIFY_START",
+  "percent": 40,
+  "total_files": 10
+}
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BUCKET_NAME` | GCS bucket for PDFs | `preavaluos-pdf` |
+| `FIRESTORE_DATABASE` | Firestore database name | `apolo-preavaluos-dev` |
+| `PORT` | HTTP port | `8080` |
+| `PYTHONUNBUFFERED` | Unbuffered output | `1` |
+
+## Security
+
+### Authentication
+- **Development**: Allow unauthenticated (for testing)
+- **Production**: Require authentication (OIDC or API key)
+
+### Service Account Permissions
+- `roles/storage.objectViewer` - Read PDFs from GCS
+- `roles/datastore.user` - Read/write Firestore
+- `roles/logging.logWriter` - Write logs
+
+### Data Protection
+- Encryption at rest (default GCP)
+- Encryption in transit (TLS 1.2+)
+- No sensitive data in logs
+- Non-root container user
+
+## Cost Optimization
+
+### Strategies Implemented
+1. **Scale to zero** - No cost when idle (min_instances=0 in dev)
+2. **Idempotency** - Prevents duplicate processing
+3. **Early validation** - Fails fast before expensive AI calls
+4. **Result caching** - Firestore cache reduces reprocessing
+5. **Efficient container** - Slim base image reduces cold start costs
+
+### Estimated Costs (Development)
+- Cloud Run: $2-5/month
+- Cloud Storage: $1-2/month
+- Firestore: $0.50-2/month
+- **Total: ~$5-10/month** (light usage)
+
+## Troubleshooting
+
+### Service Not Responding
+```bash
+# Check service status
+gcloud run services describe apolo-procesamiento-inteligente --region us-south1
+
+# View recent errors
+gcloud logging read "severity>=ERROR" --limit 20
+```
+
+### Permission Denied
+```bash
+# Verify service account permissions
+gcloud projects get-iam-policy PROJECT_ID \
+  --filter="bindings.members:serviceAccount:SA_EMAIL"
+```
+
+### Container Build Fails
+```bash
+# Check build logs
+gcloud builds list --limit=1
+gcloud builds log BUILD_ID
+```
+
+## Project Structure
+
+```
+apolo_procesamiento_inteligente_preavaluo/
+├── apolo_procesamiento_inteligente.py  # Main service code
+├── requirements.txt                     # Python dependencies
+├── Dockerfile                           # Container definition
+├── runtime.txt                          # Python version
+├── workflow.yaml                        # Cloud Workflows config (optional)
+├── README.md                            # This file
+│
+├── Documentation/                       # Complete documentation
+│   ├── ARCHITECTURE.md                  # System architecture
+│   ├── INFRASTRUCTURE.md                # Infrastructure details
+│   ├── DEPLOYMENT_CHECKLIST.md          # Deployment guide
+│   ├── GCP_COMMANDS.md                  # Command reference
+│   ├── FIRESTORE_SCHEMA.md              # Database schema
+│   ├── TESTING.md                       # Testing procedures
+│   └── QUICKSTART.md                    # Quick start guide
+│
+├── scripts/                             # Deployment automation
+│   ├── powershell/                      # Windows scripts
+│   │   ├── deploy-complete.ps1          # Full deployment
+│   │   ├── build-docker.ps1             # Build container
+│   │   ├── deploy-cloudrun.ps1          # Deploy service
+│   │   └── test-cloudrun.ps1            # Test suite
+│   └── bash/                            # Linux/Mac scripts
+│       ├── build-docker.sh
+│       ├── deploy-cloudrun.sh
+│       └── test-cloudrun.sh
+│
+└── infrastructure/
+    └── terraform/                       # Infrastructure as Code
+        ├── main.tf                      # Core resources
+        ├── variables.tf                 # Variable definitions
+        ├── outputs.tf                   # Output values
+        ├── providers.tf                 # Provider config
+        ├── README.md                    # Terraform guide
+        └── env/                         # Environment configs
+            ├── dev.tfvars
+            ├── qa.tfvars
+            └── prod.tfvars
+```
+
+## Development
+
+### Local Development
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run locally
+functions-framework --target=document_processor --debug
+```
+
+### Docker Build
+```bash
+# Build image
+docker build -t apolo-procesamiento-inteligente .
+
+# Run locally
+docker run -p 8080:8080 \
+  -e BUCKET_NAME=preavaluos-pdf \
+  -e FIRESTORE_DATABASE=apolo-preavaluos-dev \
+  apolo-procesamiento-inteligente
+```
+
+## Roadmap
+
+### Current (v1.0) - Simulated Processing
+- ✅ PDF validation
+- ✅ Simulated classification
+- ✅ Simulated extraction
+- ✅ Firestore persistence
+- ✅ Idempotency
+- ✅ Three processing modes
+
+### Next (v1.1) - Document AI Integration
+- [ ] Real Document AI Classifier
+- [ ] Real Document AI Extractor
+- [ ] Custom processor training
+- [ ] Confidence thresholds
+- [ ] Human review queue
+
+### Future (v2.0) - Advanced Features
+- [ ] Multi-region deployment
+- [ ] Advanced analytics
+- [ ] BigQuery integration
+- [ ] Real-time notifications
+- [ ] API Gateway
+
+## Support
+
+- **Documentation**: See `Documentation/` folder
+- **Issues**: GitHub Issues
+- **Questions**: Contact DevOps team
+
+## License
+
+MIT License - See [LICENSE](LICENSE) file
+
+---
+
+**Maintained by**: Apolo Solutions DevOps Team  
+**Version**: 1.0.0  
+**Last Updated**: December 2025
   "document_count": 2,
   "results": [
     {
