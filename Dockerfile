@@ -29,9 +29,11 @@ USER appuser
 # Expone puerto 8080 (estándar de Cloud Run)
 EXPOSE 8080
 
-# Comando para iniciar la aplicación con gunicorn
+# Configura el puerto desde variable de entorno
+ENV PORT=8080
+
+# Comando para iniciar la aplicación
 CMD exec functions-framework \
     --target=document_processor \
     --signature-type=http \
-    --port=8080 \
-    --host=0.0.0.0
+    --port=$PORT
