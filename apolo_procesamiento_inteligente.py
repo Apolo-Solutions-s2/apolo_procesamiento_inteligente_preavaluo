@@ -577,15 +577,19 @@ def document_processor(request: Any):
         if not isinstance(data, dict):
             data = {}
 
-        # Parámetros según spec: folioId, fileId, gcs_pdf_uri, workflow_execution_id
-        run_id = _make_run_id(data)
+        # Parámetros según spec: 
+        # - Formato NUEVO: runId, preavaluo_id, fileList (Document AI batch)
+        # - Formato LEGACY: folioId, fileId, gcs_pdf_uri, workflow_execution_id
+        run_id = data.get("runId") or _make_run_id(data)
+        file_list = data.get("fileList", [])  # Nuevo formato
+        
         folio_id = str(data.get("folioId", "") or "").strip()
         file_id = str(data.get("fileId", "") or "").strip()
         gcs_pdf_uri = str(data.get("gcs_pdf_uri", "") or "").strip()
         
         # Mantener compatibilidad con folder_prefix para listar múltiples archivos
         folder_prefix = _normalize_prefix(data.get("folder_prefix", ""))
-        preavaluo_id = folio_id or _infer_preavaluo_id(folder_prefix, data.get("preavaluo_id"))
+        preavaluo_id = data.get("preavaluo_id") or folio_id or _infer_preavaluo_id(folder_prefix, data.get("preavaluo_id"))
 
         # Logs iniciales
         _log_progress(
@@ -598,13 +602,16 @@ def document_processor(request: Any):
         )
 
         # Validación (regla: error=>500)
-        # Dos modos: procesamiento individual (gcs_pdf_uri) o batch (folder_prefix)
-        if not gcs_pdf_uri and not folder_prefix:
+        # Tres modos: 
+        # 1) Nuevo formato batch: fileList
+        # 2) Individual: gcs_pdf_uri
+        # 3) Batch legacy: folder_prefix
+        if not file_list and not gcs_pdf_uri and not folder_prefix:
             raise AppError(
                 code="MISSING_REQUIRED_PARAMS",
-                message="Either gcs_pdf_uri or folder_prefix is required.",
+                message="Either fileList, gcs_pdf_uri, or folder_prefix is required.",
                 stage="VALIDATION",
-                details={"expected": "gcs_pdf_uri (individual) or folder_prefix (batch)"},
+                details={"expected": "fileList (batch) or gcs_pdf_uri (individual) or folder_prefix (batch)"},
             )
         
         # Si es procesamiento individual, validar parámetros completos
@@ -623,8 +630,84 @@ def document_processor(request: Any):
         # Crear/actualizar documento de run en Firestore
         _ensure_run_document(db, run_id, preavaluo_id, bucket_name, folder_prefix)
         
-        # Modo individual: procesar un solo documento
-        if gcs_pdf_uri:
+        # Modo 1: fileList (nuevo formato Document AI)
+        if file_list:
+            if not isinstance(file_list, list):
+                raise AppError(
+                    code="INVALID_FILE_LIST",
+                    message="fileList must be an array",
+                    stage="VALIDATION",
+                    details={"provided_type": str(type(file_list))},
+                )
+            
+            results = []
+            for file_item in file_list:
+                if not isinstance(file_item, dict):
+                    continue
+                
+                item_gcs_uri = file_item.get("gcsUri", "")
+                item_file_name = file_item.get("file_name", "")
+                
+                if not item_gcs_uri or not item_gcs_uri.startswith("gs://"):
+                    continue
+                
+                # Extraer bucket y blob
+                parts = item_gcs_uri[5:].split("/", 1)
+                if len(parts) != 2:
+                    continue
+                
+                item_bucket = parts[0]
+                blob_name = parts[1]
+                
+                # Generar IDs para este documento
+                item_folio_id = preavaluo_id
+                item_file_id = item_file_name or blob_name.split("/")[-1]
+                
+                # Procesar documento
+                try:
+                    result = _process_single_document(
+                        storage_client=storage_client,
+                        db=db,
+                        run_id=run_id,
+                        bucket_name=item_bucket,
+                        blob_name=blob_name,
+                        folio_id=item_folio_id,
+                        file_id=item_file_id,
+                    )
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"Error processing {blob_name}: {e}")
+                    results.append({
+                        "file_name": item_file_name,
+                        "status": "error",
+                        "error": str(e),
+                    })
+            
+            # Actualizar run con resultados finales
+            run_ref = db.collection("runs").document(run_id)
+            processed_count = sum(1 for r in results if r.get("status") == "processed")
+            failed_count = len(results) - processed_count
+            
+            run_ref.update({
+                "status": "completed",
+                "processedCount": processed_count,
+                "failedCount": failed_count,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            })
+            
+            return jsonify({
+                "status": "completed",
+                "runId": run_id,
+                "preavaluo_id": preavaluo_id,
+                "bucket": item_bucket if file_list else bucket_name,
+                "document_count": len(results),
+                "processedCount": processed_count,
+                "failedCount": failed_count,
+                "results": results,
+            }), 200
+        
+        # Modo 2: Individual con gcs_pdf_uri (legacy)
+        elif gcs_pdf_uri:
             # Extraer bucket y blob name de gs://bucket/path/file.pdf
             if not gcs_pdf_uri.startswith("gs://"):
                 raise AppError(
