@@ -522,18 +522,22 @@ def _process_single_document(
         Dict con status, classification, extraction, from_cache, etc.
     """
     # Generar docId único basado en folio y archivo
-    doc_id = _generate_doc_id(folio_id, file_id)
+    doc_id = _make_doc_id(folio_id, file_id)
+    
+    # Construir URI de GCS
+    gcs_uri = f"gs://{bucket_name}/{blob_name}"
     
     # Verificar idempotencia y lease
-    cached_result = _check_and_acquire_lease(
+    can_process, cached_result = _check_and_acquire_lease(
         db=db,
         run_id=run_id,
         doc_id=doc_id,
         folio_id=folio_id,
         file_id=file_id,
+        gcs_uri=gcs_uri,
     )
     
-    if cached_result:
+    if not can_process and cached_result:
         # Ya está procesado - retornar desde cache
         return {
             "file_name": file_id,
@@ -563,7 +567,7 @@ def _process_single_document(
         # 2. Extracción
         extraction = simulate_extraction(
             file_name=file_id,
-            document_type=classification.get("documentType", "UNKNOWN")
+            category=classification.get("documentType", "UNKNOWN")
         )
         
         # 3. Persistir resultado
@@ -573,7 +577,7 @@ def _process_single_document(
             doc_id=doc_id,
             folio_id=folio_id,
             file_id=file_id,
-            gcs_uri=f"gs://{bucket_name}/{blob_name}",
+            gcs_uri=gcs_uri,
             classification=classification,
             extraction=extraction,
         )
