@@ -1,0 +1,262 @@
+================================================================================
+  SCRIPT ÚNICO PARA CLOUD SHELL - COPIAR Y PEGAR
+================================================================================
+
+ARCHIVO A COPIAR:
+  scripts/deploy-cloudshell.sh
+
+PASOS:
+  1. Abre el archivo: scripts/deploy-cloudshell.sh
+  2. Selecciona TODO el contenido (Ctrl+A)
+  3. Copia (Ctrl+C)
+  4. Ve a Google Cloud Console → Cloud Shell
+  5. Pega (Ctrl+Shift+V o clic derecho → Paste)
+  6. Presiona Enter
+  7. Cuando pregunte "¿Continuar con este proyecto?" → responde: s
+
+================================================================================
+
+CONFIGURACIÓN AUTOMÁTICA:
+
+  ✓ Región:               us-south1 (Dallas, Texas)
+  ✓ Base de datos:        apolo-preavaluos-dev
+  ✓ Colección Firestore:  apolo_procesamiento
+  ✓ Bucket GCS:           preavaluos-pdf
+  ✓ Servicio Cloud Run:   apolo-procesamiento-inteligente
+
+  NO NECESITAS CAMBIAR NADA - TODO ESTÁ CONFIGURADO AUTOMÁTICAMENTE
+
+================================================================================
+
+LO QUE HACE EL SCRIPT (AUTOMÁTICO):
+
+  [Paso 1] Habilita APIs de GCP
+           • Cloud Run, Cloud Build, Storage, Firestore
+
+  [Paso 2] Crea bucket GCS
+           • Nombre: preavaluos-pdf
+           • Región: us-south1
+           • Versionado habilitado
+
+  [Paso 3] Configura Firestore
+           • Base de datos: apolo-preavaluos-dev
+           • Región: us-south1
+           • Colección: apolo_procesamiento (se crea automáticamente)
+
+  [Paso 4] Clona código desde GitHub
+           • Repositorio: apolo_procesamiento_inteligente_preavaluo
+
+  [Paso 5] Construye imagen Docker
+           • Con Cloud Build
+           • Sube a Container Registry
+
+  [Paso 6] Despliega a Cloud Run
+           • Memoria: 512MB
+           • CPU: 1
+           • Timeout: 300s
+           • Autoscaling: 0-10 instancias
+           • Región: us-south1 (Dallas)
+
+  [Paso 7] Crea datos de prueba
+           • 3 PDFs de ejemplo en GCS
+
+  [Paso 8] Ejecuta 5 tests automáticos
+           • Health check
+           • Procesamiento individual
+           • Procesamiento batch
+           • Idempotencia (cache)
+           • Manejo de errores
+
+  [Paso 9] Muestra resultado
+           • URL del servicio
+           • Comandos útiles
+           • Links a consolas web
+
+================================================================================
+
+TIEMPO DE EJECUCIÓN: 5-7 minutos
+
+COSTO: ~$0 (usa free tier de GCP)
+
+================================================================================
+
+DESPUÉS DEL DESPLIEGUE:
+
+El script te dará la URL del servicio:
+  https://apolo-procesamiento-inteligente-xxxxx-uc.a.run.app
+
+GUARDA ESTA URL - la necesitas para hacer requests desde tu aplicación.
+
+================================================================================
+
+PROBAR EL SERVICIO:
+
+1. Sube un PDF:
+   gsutil cp mi_documento.pdf gs://preavaluos-pdf/MI-FOLIO-001/
+
+2. Procésalo:
+   curl -X POST "https://TU_SERVICIO.run.app" \
+     -H "Content-Type: application/json" \
+     -d '{
+     "folioId": "MI-FOLIO-001",
+     "fileId": "mi_documento.pdf",
+     "gcs_pdf_uri": "gs://preavaluos-pdf/MI-FOLIO-001/mi_documento.pdf",
+     "workflow_execution_id": "test-123"
+   }'
+
+3. Verifica en Firestore:
+   • Base de datos: apolo-preavaluos-dev
+   • Colección: apolo_procesamiento
+   • Busca el documento por folio_id
+
+================================================================================
+
+CONSOLAS WEB (después del despliegue):
+
+Cloud Run:
+  https://console.cloud.google.com/run/detail/us-south1/apolo-procesamiento-inteligente
+
+Firestore:
+  https://console.firebase.google.com/project/[PROJECT_ID]/firestore/databases/apolo-preavaluos-dev
+
+Cloud Storage:
+  https://console.cloud.google.com/storage/browser/preavaluos-pdf
+
+Logs:
+  https://console.cloud.google.com/logs/query
+
+================================================================================
+
+COMANDOS ÚTILES (desde Cloud Shell):
+
+Ver logs en tiempo real:
+  gcloud run services logs tail apolo-procesamiento-inteligente --region=us-south1
+
+Ver últimos 50 logs:
+  gcloud run services logs read apolo-procesamiento-inteligente --region=us-south1 --limit=50
+
+Ver documentos en Firestore:
+  gcloud firestore documents list --database=apolo-preavaluos-dev --collection-ids=apolo_procesamiento
+
+Redesplegar (después de cambios):
+  cd apolo_procesamiento_inteligente_preavaluo
+  gcloud builds submit --tag=gcr.io/$PROJECT_ID/apolo-procesamiento-inteligente .
+  gcloud run deploy apolo-procesamiento-inteligente \
+    --image=gcr.io/$PROJECT_ID/apolo-procesamiento-inteligente \
+    --region=us-south1
+
+================================================================================
+
+GUÍAS ADICIONALES:
+
+  📖 Guía Ejecutiva:     DESPLIEGUE_DALLAS.md
+  📖 Guía Detallada:     scripts/CLOUDSHELL_DEPLOY.md
+  📖 Documentación:      docs/
+
+================================================================================
+
+CHECKLIST RÁPIDO:
+
+Antes de ejecutar:
+  [ ] Estoy en Google Cloud Console
+  [ ] Tengo Cloud Shell abierto
+  [ ] Tengo permisos de Editor/Owner
+
+Durante la ejecución:
+  [ ] Copié TODO el script deploy-cloudshell.sh
+  [ ] Pegué en Cloud Shell
+  [ ] Respondí 's' cuando preguntó
+
+Después del despliegue:
+  [ ] Guardé la URL del servicio
+  [ ] Verifiqué Firestore (base de datos: apolo-preavaluos-dev)
+  [ ] Probé con un PDF de prueba
+
+================================================================================
+
+ESTRUCTURA DE RESPUESTA (Éxito):
+
+{
+  "status": "processed",
+  "preavaluo_id": "PRE-2025-001",
+  "document_count": 1,
+  "results": [
+    {
+      "file_name": "balance_general.pdf",
+      "gcs_uri": "gs://preavaluos-pdf/PRE-2025-001/balance_general.pdf",
+      "classification": {
+        "document_type": "BalanceGeneral",
+        "confidence": 0.95
+      },
+      "extraction": {
+        "fields": {...},
+        "metadata": {...}
+      },
+      "processed_at": "2025-12-04T14:30:00Z",
+      "from_cache": false
+    }
+  ]
+}
+
+================================================================================
+
+PROCESAMIENTO BATCH (carpeta completa):
+
+Request:
+{
+  "folder_prefix": "PRE-2025-001/",
+  "preavaluo_id": "PRE-2025-001",
+  "extensions": [".pdf"],
+  "max_items": 500,
+  "workflow_execution_id": "test-batch-123"
+}
+
+El servicio procesa TODOS los PDFs en la carpeta automáticamente.
+
+================================================================================
+
+FIRESTORE - ESTRUCTURA DE DOCUMENTOS:
+
+Base de datos: apolo-preavaluos-dev
+Colección:     apolo_procesamiento
+Document ID:   Hash SHA-256 de "folioId:fileId" (16 caracteres)
+
+Campos guardados:
+  • doc_id
+  • folio_id
+  • file_id
+  • gcs_uri
+  • run_id
+  • status (completed/failed/processing)
+  • classification {...}
+  • extraction {...}
+  • processing_started_at
+  • processed_at
+  • updated_at
+
+IDEMPOTENCIA:
+  Si re-procesas el mismo documento → respuesta desde cache
+  Campo en respuesta: "from_cache": true
+
+================================================================================
+
+SOLUCIÓN DE PROBLEMAS:
+
+"Project not set":
+  gcloud config set project TU_PROJECT_ID
+
+"Permission denied":
+  Necesitas roles: Editor, Owner, Run Admin, Storage Admin, Datastore Owner
+
+Servicio no responde:
+  gcloud run services logs tail apolo-procesamiento-inteligente --region=us-south1
+
+================================================================================
+
+TODO LISTO PARA COPIAR Y PEGAR EN CLOUD SHELL
+
+Archivo: scripts/deploy-cloudshell.sh
+
+¡Éxito con tu despliegue! 🚀
+
+================================================================================

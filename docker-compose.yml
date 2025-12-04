@@ -1,0 +1,40 @@
+# Configuración Docker Compose para desarrollo local
+version: '3.8'
+
+services:
+  apolo-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apolo-procesamiento-inteligente
+    ports:
+      - "8080:8080"
+    environment:
+      - BUCKET_NAME=${BUCKET_NAME:-preavaluos-pdf}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Monta las credenciales de GCP (ajusta la ruta según tu sistema)
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials.json}:/app/credentials.json:ro
+      # Monta el código para desarrollo hot-reload (opcional)
+      # - ./apolo_procesamiento_inteligente.py:/app/apolo_procesamiento_inteligente.py:ro
+    restart: unless-stopped
+    networks:
+      - apolo-network
+
+  # Emulador de Firestore (opcional, para desarrollo sin GCP)
+  firestore-emulator:
+    image: google/cloud-sdk:latest
+    container_name: firestore-emulator
+    ports:
+      - "8081:8081"
+    command: >
+      gcloud beta emulators firestore start
+      --host-port=0.0.0.0:8081
+      --project=apolo-local-dev
+    networks:
+      - apolo-network
+
+networks:
+  apolo-network:
+    driver: bridge
