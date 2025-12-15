@@ -1,0 +1,32 @@
+flowchart LR
+
+    WF["Cloud Workflows<br/>invoke Job(runId, folderPrefix)"]
+
+    CR["Cloud Run Job<br/>Procesamiento Inteligente"]
+
+    GCS["Cloud Storage<br/>PDF/A Files"]
+
+    CLASS["Document AI Classifier"]
+    EXTR["Document AI Extractor"]
+
+    FS_runs["Firestore<br/>runs/{runId}"]
+    FS_docs["Firestore<br/>runs/{runId}/documents/{docId}"]
+
+    DLQ["Pub/Sub DLQ"]
+
+    %% Flow
+    WF --> CR
+
+    CR -->|list folder| GCS
+    CR -->|load PDF| GCS
+
+    CR -->|classify| CLASS
+    CR -->|extract| EXTR
+
+    CR -->|write run metadata| FS_runs
+    CR -->|write doc results| FS_docs
+
+    CR -->|on failure > threshold| DLQ
+
+    CLASS --> CR
+    EXTR --> CR

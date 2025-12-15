@@ -12,7 +12,6 @@
 locals {
   function_full_name = "${var.function_name}-${var.environment}"
   bucket_full_name   = "${var.bucket_name}-${var.environment}"
-  workflow_full_name = "${var.workflow_name}-${var.environment}"
   sa_email           = "${var.service_account_name}-${var.environment}@${var.project_id}.iam.gserviceaccount.com"
 
   # Labels combinados con environment
@@ -50,6 +49,122 @@ resource "google_service_account" "function_sa" {
   project      = var.project_id
 
   depends_on = [google_project_service.required_apis]
+}
+
+# ─────────────────────────────────────────────────────────────
+# Document AI Processors
+# ─────────────────────────────────────────────────────────────
+
+# Classifier Processor - Clasifica tipos de documentos
+resource "google_document_ai_processor" "classifier" {
+  location     = var.region
+  display_name = "apolo-classifier-${var.environment}"
+  type         = var.documentai_classifier_type
+  project      = var.project_id
+
+  depends_on = [google_project_service.required_apis]
+}
+
+# Extractor Processor - Extrae datos estructurados
+resource "google_document_ai_processor" "extractor" {
+  location     = var.region
+  display_name = "apolo-extractor-${var.environment}"
+  type         = var.documentai_extractor_type
+  project      = var.project_id
+
+  depends_on = [google_project_service.required_apis]
+}
+
+# IAM para Document AI
+resource "google_project_iam_member" "function_sa_documentai" {
+  project = var.project_id
+  role    = "roles/documentai.apiUser"
+  member  = "serviceAccount:${google_service_account.function_sa.email}"
+}
+
+# ─────────────────────────────────────────────────────────────
+# Pub/Sub Topic para Dead Letter Queue
+# ─────────────────────────────────────────────────────────────
+
+resource "google_pubsub_topic" "dlq" {
+  name    = "${var.dlq_topic_name}-${var.environment}"
+  project = var.project_id
+
+  message_retention_duration = "${var.dlq_retention_days * 24}h"
+
+  labels = local.common_labels
+
+  depends_on = [google_project_service.required_apis]
+}
+
+# Subscription para DLQ (para consumo manual)
+resource "google_pubsub_subscription" "dlq_pull" {
+  name    = "${var.dlq_topic_name}-sub-${var.environment}"
+  topic   = google_pubsub_topic.dlq.name
+  project = var.project_id
+
+  # Retener mensajes por 7 días
+  message_retention_duration = "${var.dlq_retention_days * 24}h"
+  retain_acked_messages      = true
+
+  ack_deadline_seconds = 300
+
+  labels = local.common_labels
+}
+
+# IAM para publicar al DLQ
+resource "google_pubsub_topic_iam_member" "function_sa_publisher" {
+  project = google_pubsub_topic.dlq.project
+  topic   = google_pubsub_topic.dlq.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.function_sa.email}"
+}
+
+# ─────────────────────────────────────────────────────────────
+# Eventarc Trigger - Activación automática en GCS
+# ─────────────────────────────────────────────────────────────
+
+resource "google_eventarc_trigger" "gcs_trigger" {
+  count = var.enable_eventarc ? 1 : 0
+
+  name     = "${var.eventarc_trigger_name}-${var.environment}"
+  location = var.region
+  project  = var.project_id
+
+  matching_criteria {
+    attribute = "type"
+    value     = "google.cloud.storage.object.v1.finalized"
+  }
+
+  matching_criteria {
+    attribute = "bucket"
+    value     = google_storage_bucket.pdf_bucket.name
+  }
+
+  destination {
+    cloud_run_service {
+      service = google_cloud_run_v2_service.processor.name
+      region  = var.region
+    }
+  }
+
+  service_account = google_service_account.function_sa.email
+
+  labels = local.common_labels
+
+  depends_on = [
+    google_project_service.required_apis,
+    google_cloud_run_v2_service.processor,
+  ]
+}
+
+# IAM para Eventarc invocar Cloud Function
+resource "google_project_iam_member" "eventarc_invoker" {
+  count = var.enable_eventarc ? 1 : 0
+
+  project = var.project_id
+  role    = "roles/eventarc.eventReceiver"
+  member  = "serviceAccount:${google_service_account.function_sa.email}"
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -144,175 +259,142 @@ resource "google_firestore_database" "main" {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Cloud Storage Bucket - Source Code de la Cloud Function
+# Artifact Registry Repository - Para imágenes Docker
 # ─────────────────────────────────────────────────────────────
 
-resource "google_storage_bucket" "function_source" {
-  name          = "${var.project_id}-${var.environment}-gcf-source"
+resource "google_artifact_registry_repository" "docker_repo" {
   location      = var.region
-  storage_class = "STANDARD"
+  repository_id = "apolo-docker-repo"
+  description   = "Docker repository for Apolo microservices"
+  format        = "DOCKER"
   project       = var.project_id
 
-  uniform_bucket_level_access = true
-
   labels = local.common_labels
 
   depends_on = [google_project_service.required_apis]
 }
 
 # ─────────────────────────────────────────────────────────────
-# Archivo ZIP del Código Fuente
+# Cloud Run Service v2 - Microservicio Contenerizado
 # ─────────────────────────────────────────────────────────────
 
-data "archive_file" "function_source" {
-  type        = "zip"
-  source_dir  = var.function_source_dir
-  output_path = "${path.module}/function-source.zip"
-  excludes = [
-    ".git",
-    ".gitignore",
-    "*.pyc",
-    "__pycache__",
-    "*.backup",
-    "infrastructure",
-    ".terraform",
-    "*.tfstate",
-    "*.tfvars",
-  ]
-}
+resource "google_cloud_run_v2_service" "processor" {
+  name     = local.function_full_name
+  location = var.region
+  project  = var.project_id
 
-# ─────────────────────────────────────────────────────────────
-# Upload del Source Code a GCS
-# ─────────────────────────────────────────────────────────────
+  template {
+    service_account = google_service_account.function_sa.email
 
-resource "google_storage_bucket_object" "function_source" {
-  name   = "function-source-${data.archive_file.function_source.output_md5}.zip"
-  bucket = google_storage_bucket.function_source.name
-  source = data.archive_file.function_source.output_path
+    containers {
+      image = var.cloudrun_image
 
-  depends_on = [data.archive_file.function_source]
-}
+      ports {
+        container_port = 8080
+      }
 
-# ─────────────────────────────────────────────────────────────
-# Cloud Function v2 (2nd Gen)
-# ─────────────────────────────────────────────────────────────
+      resources {
+        limits = {
+          cpu    = var.cloudrun_cpu
+          memory = var.cloudrun_memory
+        }
+      }
 
-resource "google_cloudfunctions2_function" "processor" {
-  name        = local.function_full_name
-  location    = var.region
-  description = var.function_description
-  project     = var.project_id
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
 
-  build_config {
-    runtime     = var.function_runtime
-    entry_point = var.function_entry_point
+      env {
+        name  = "PROCESSOR_LOCATION"
+        value = var.region
+      }
 
-    source {
-      storage_source {
-        bucket = google_storage_bucket.function_source.name
-        object = google_storage_bucket_object.function_source.name
+      env {
+        name  = "CLASSIFIER_PROCESSOR_ID"
+        value = google_document_ai_processor.classifier.id
+      }
+
+      env {
+        name  = "EXTRACTOR_PROCESSOR_ID"
+        value = google_document_ai_processor.extractor.id
+      }
+
+      env {
+        name  = "DLQ_TOPIC_NAME"
+        value = google_pubsub_topic.dlq.name
+      }
+
+      env {
+        name  = "FIRESTORE_DATABASE"
+        value = var.firestore_database_name
+      }
+
+      env {
+        name  = "MAX_CONCURRENT_DOCS"
+        value = "8"
+      }
+
+      env {
+        name  = "MAX_RETRIES"
+        value = "3"
+      }
+
+      env {
+        name  = "RETRY_INITIAL_DELAY"
+        value = "1.0"
+      }
+
+      env {
+        name  = "RETRY_MULTIPLIER"
+        value = "2.0"
+      }
+
+      env {
+        name  = "RETRY_MAX_DELAY"
+        value = "60.0"
+      }
+
+      env {
+        name  = "ENVIRONMENT"
+        value = var.environment
       }
     }
-  }
 
-  service_config {
-    max_instance_count    = var.function_max_instances
-    min_instance_count    = var.function_min_instances
-    available_memory      = var.function_memory
-    timeout_seconds       = var.function_timeout
-    service_account_email = google_service_account.function_sa.email
-
-    environment_variables = {
-      BUCKET_NAME  = google_storage_bucket.pdf_bucket.name
-      ENVIRONMENT  = var.environment
-      PROJECT_ID   = var.project_id
-      REGION       = var.region
+    scaling {
+      min_instance_count = var.cloudrun_min_instances
+      max_instance_count = var.cloudrun_max_instances
     }
 
-    ingress_settings = var.ingress_settings
+    timeout = "${var.cloudrun_timeout}s"
+  }
 
-    # Solo permitir invocación desde service accounts
-    all_traffic_on_latest_revision = true
+  traffic {
+    type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
+    percent = 100
   }
 
   labels = local.common_labels
 
   depends_on = [
     google_project_service.required_apis,
-    google_storage_bucket_object.function_source,
+    google_artifact_registry_repository.docker_repo,
   ]
 }
 
 # ─────────────────────────────────────────────────────────────
-# IAM para Cloud Function - Invoker Role
+# Cloud Run IAM - Permitir invocación desde Eventarc
 # ─────────────────────────────────────────────────────────────
 
-# Permitir invocación desde Cloud Workflows
-resource "google_cloud_run_service_iam_member" "workflow_invoker" {
-  project  = google_cloudfunctions2_function.processor.project
-  location = google_cloudfunctions2_function.processor.location
-  service  = google_cloudfunctions2_function.processor.name
+resource "google_cloud_run_v2_service_iam_member" "eventarc_invoker" {
+  project  = google_cloud_run_v2_service.processor.project
+  location = google_cloud_run_v2_service.processor.location
+  name     = google_cloud_run_v2_service.processor.name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${google_service_account.workflow_sa.email}"
+  member   = "serviceAccount:${google_service_account.function_sa.email}"
 }
 
 # ─────────────────────────────────────────────────────────────
-# Service Account para Cloud Workflows
-# ─────────────────────────────────────────────────────────────
-
-resource "google_service_account" "workflow_sa" {
-  account_id   = "apolo-workflow-sa-${var.environment}"
-  display_name = "Apolo Workflow Service Account (${var.environment})"
-  description  = "Service Account para Cloud Workflows - ${var.environment}"
-  project      = var.project_id
-
-  depends_on = [google_project_service.required_apis]
-}
-
-# Permiso para invocar Cloud Functions
-resource "google_project_iam_member" "workflow_sa_invoker" {
-  project = var.project_id
-  role    = "roles/cloudfunctions.invoker"
-  member  = "serviceAccount:${google_service_account.workflow_sa.email}"
-}
-
-# Permiso para Cloud Run (Cloud Functions v2)
-resource "google_project_iam_member" "workflow_sa_run_invoker" {
-  project = var.project_id
-  role    = "roles/run.invoker"
-  member  = "serviceAccount:${google_service_account.workflow_sa.email}"
-}
-
-# Permiso para logs
-resource "google_project_iam_member" "workflow_sa_logging" {
-  project = var.project_id
-  role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.workflow_sa.email}"
-}
-
-# ─────────────────────────────────────────────────────────────
-# Cloud Workflows - Orquestación
-# ─────────────────────────────────────────────────────────────
-
-resource "google_workflows_workflow" "main" {
-  name            = local.workflow_full_name
-  region          = var.region
-  description     = var.workflow_description
-  project         = var.project_id
-  service_account = google_service_account.workflow_sa.id
-
-  source_contents = templatefile(var.workflow_source_file, {
-    processor_url = google_cloudfunctions2_function.processor.service_config[0].uri
-  })
-
-  labels = local.common_labels
-
-  depends_on = [
-    google_project_service.required_apis,
-    google_cloudfunctions2_function.processor,
-  ]
-}
-
 # ─────────────────────────────────────────────────────────────
 # Cloud Monitoring - Alertas (solo prod)
 # ─────────────────────────────────────────────────────────────
@@ -328,7 +410,7 @@ resource "google_monitoring_alert_policy" "function_errors" {
     display_name = "Error rate > 5%"
 
     condition_threshold {
-      filter          = "resource.type = \"cloud_function\" AND resource.labels.function_name = \"${local.function_full_name}\" AND metric.type = \"cloudfunctions.googleapis.com/function/execution_count\" AND metric.labels.status != \"ok\""
+      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${local.function_full_name}\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class != \"2xx\""
       duration        = "300s"
       comparison      = "COMPARISON_GT"
       threshold_value = 5
@@ -354,9 +436,9 @@ resource "google_logging_project_sink" "function_logs" {
 
   name        = "apolo-procesamiento-logs-${var.environment}"
   project     = var.project_id
-  destination = "storage.googleapis.com/${google_storage_bucket.function_source.name}"
+  destination = "storage.googleapis.com/${google_storage_bucket.pdf_bucket.name}"
 
-  filter = "resource.type = \"cloud_function\" AND resource.labels.function_name = \"${local.function_full_name}\""
+  filter = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${local.function_full_name}\""
 
   unique_writer_identity = true
 

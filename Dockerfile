@@ -33,8 +33,9 @@ EXPOSE 8080
 ENV PORT=8080
 
 # Comando para iniciar la aplicación
+# Ahora usa cloud_event signature para Eventarc
 CMD exec functions-framework \
-    --target=document_processor \
+    --target=process_folder_on_ready \
     --source=apolo_procesamiento_inteligente.py \
-    --signature-type=http \
+    --signature-type=cloudevent \
     --port=$PORT

@@ -14,19 +14,21 @@ zone        = "us-south1-a"
 environment = "qa"
 
 # ─────────────────────────────────────────────────────────────
-# Cloud Function - Configuración QA
+# Cloud Run - Configuración QA
 # ─────────────────────────────────────────────────────────────
 
 function_name        = "apolo-procesamiento-inteligente"
 function_description = "Procesamiento inteligente de documentos financieros - QA"
-function_runtime     = "python311"
-function_entry_point = "document_processor"
+
+# Imagen Docker desde Artifact Registry
+cloudrun_image = "us-south1-docker.pkg.dev/apolo-qa-project/apolo-docker-repo/apolo-procesamiento:latest"
 
 # QA: Recursos intermedios para testing realista
-function_timeout       = 450  # 7.5 minutos
-function_memory        = "512M"
-function_min_instances = 0
-function_max_instances = 5  # Más que dev, menos que prod
+cloudrun_cpu            = "2"
+cloudrun_memory         = "1Gi"
+cloudrun_timeout        = 450  # 7.5 minutos
+cloudrun_min_instances  = 0
+cloudrun_max_instances  = 5    # Más que dev, menos que prod
 
 # ─────────────────────────────────────────────────────────────
 # Cloud Storage
@@ -42,15 +44,8 @@ bucket_lifecycle_age = 60  # Mover a nearline después de 60 días en QA
 # ─────────────────────────────────────────────────────────────
 
 firestore_database_name      = "(default)"
-firestore_location           = "nam5"
+firestore_location           = "us-south1"
 firestore_collection_ttl_days = 180  # Retención media en QA
-
-# ─────────────────────────────────────────────────────────────
-# Cloud Workflows
-# ─────────────────────────────────────────────────────────────
-
-workflow_name        = "apolo-procesamiento-workflow"
-workflow_description = "Orquestación del procesamiento de documentos - QA"
 
 # ─────────────────────────────────────────────────────────────
 # Networking y Seguridad

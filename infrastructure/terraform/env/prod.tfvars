@@ -14,19 +14,21 @@ zone        = "us-south1-a"
 environment = "prod"
 
 # ─────────────────────────────────────────────────────────────
-# Cloud Function - Configuración Production
+# Cloud Run - Configuración Production
 # ─────────────────────────────────────────────────────────────
 
 function_name        = "apolo-procesamiento-inteligente"
 function_description = "Procesamiento inteligente de documentos financieros - PRODUCTION"
-function_runtime     = "python311"
-function_entry_point = "document_processor"
+
+# Imagen Docker desde Artifact Registry
+cloudrun_image = "us-south1-docker.pkg.dev/apolo-prod-project/apolo-docker-repo/apolo-procesamiento:latest"
 
 # Prod: Máximos recursos para confiabilidad
-function_timeout       = 540  # 9 minutos (máximo para Cloud Functions)
-function_memory        = "1Gi"  # 1GB para procesamiento pesado
-function_min_instances = 1      # Al menos 1 instancia caliente
-function_max_instances = 10     # Escalado hasta 10 instancias
+cloudrun_cpu            = "2"
+cloudrun_memory         = "2Gi"  # 2GB para procesamiento pesado
+cloudrun_timeout        = 540    # 9 minutos (máximo)
+cloudrun_min_instances  = 1      # Al menos 1 instancia caliente
+cloudrun_max_instances  = 10     # Escalado hasta 10 instancias
 
 # ─────────────────────────────────────────────────────────────
 # Cloud Storage
@@ -42,15 +44,8 @@ bucket_lifecycle_age = 90  # Mover a nearline después de 90 días
 # ─────────────────────────────────────────────────────────────
 
 firestore_database_name      = "(default)"
-firestore_location           = "nam5"
+firestore_location           = "us-south1"
 firestore_collection_ttl_days = 365  # Retención completa de 1 año
-
-# ─────────────────────────────────────────────────────────────
-# Cloud Workflows
-# ─────────────────────────────────────────────────────────────
-
-workflow_name        = "apolo-procesamiento-workflow"
-workflow_description = "Orquestación del procesamiento de documentos - PRODUCTION"
 
 # ─────────────────────────────────────────────────────────────
 # Networking y Seguridad

@@ -1,6 +1,133 @@
-# 📜 Scripts - Apolo Procesamiento Inteligente
+# Scripts de Despliegue para Google Cloud Shell
 
-Esta carpeta contiene todos los scripts de automatización para construcción, despliegue y pruebas del microservicio.
+Este directorio contiene scripts simplificados y optimizados para ejecutar desde **Google Cloud Shell** (ambiente web de GCP).
+
+## 📋 Scripts Disponibles
+
+### 1. `setup.sh` - Configuración Inicial
+Configura el proyecto GCP por primera vez: habilita APIs, crea service accounts y configura el backend de Terraform.
+
+```bash
+./setup.sh [PROJECT_ID]
+```
+
+**Ejemplo:**
+```bash
+./setup.sh apolo-dev-project
+```
+
+**Qué hace:**
+- Habilita todas las APIs necesarias
+- Crea el bucket para el estado de Terraform
+- Crea el service account principal
+- Asigna roles IAM necesarios
+
+### 2. `deploy.sh` - Despliegue Completo
+Despliega la aplicación completa: construye la imagen Docker, despliega infraestructura con Terraform y verifica el despliegue.
+
+```bash
+./deploy.sh [ENVIRONMENT] [PROJECT_ID]
+```
+
+**Ejemplos:**
+```bash
+./deploy.sh dev apolo-dev-project
+./deploy.sh prod apolo-prod-project
+```
+
+**Qué hace:**
+1. Configura el proyecto GCP
+2. Construye y sube la imagen Docker usando Cloud Build
+3. Despliega infraestructura con Terraform
+4. Verifica el servicio Cloud Run
+5. Muestra resumen de recursos desplegados
+
+## 🚀 Inicio Rápido
+
+### Primera vez (Configuración inicial):
+
+```bash
+# 1. Clonar el repositorio (en Cloud Shell)
+git clone [REPO_URL]
+cd apolo_procesamiento_inteligente_preavaluo/scripts
+
+# 2. Dar permisos de ejecución
+chmod +x setup.sh deploy.sh
+
+# 3. Ejecutar setup inicial
+./setup.sh apolo-dev-project
+
+# 4. Desplegar aplicación
+./deploy.sh dev apolo-dev-project
+```
+
+### Despliegues siguientes:
+
+```bash
+# Solo ejecutar deploy
+./deploy.sh dev apolo-dev-project
+```
+
+## 🌍 Ambientes
+
+Los scripts soportan tres ambientes:
+- **dev**: Desarrollo (recursos mínimos)
+- **qa**: Quality Assurance (recursos medios)
+- **prod**: Producción (recursos completos)
+
+Cada ambiente tiene su archivo de variables en `infrastructure/terraform/env/`:
+- `dev.tfvars`
+- `qa.tfvars`
+- `prod.tfvars`
+
+## 📝 Variables de Entorno
+
+Los scripts usan las siguientes variables (opcionales):
+
+```bash
+export GCP_REGION=us-south1  # Región predeterminada
+```
+
+## ⚠️ Notas Importantes
+
+1. **Google Cloud Shell**: Estos scripts están optimizados para ejecutarse en Google Cloud Shell, no requieren Docker ni herramientas locales
+2. **Cloud Build**: Se usa Cloud Build en lugar de Docker local para construcción de imágenes
+3. **Permisos**: Asegúrate de tener permisos de Owner o Editor en el proyecto
+4. **Costos**: El script de setup habilita APIs que pueden generar costos
+5. **Scripts antiguos eliminados**: Se han removido carpetas `bash/` y `powershell/` con scripts redundantes
+
+## 🔧 Troubleshooting
+
+### Error: "Permission denied"
+```bash
+chmod +x setup.sh deploy.sh
+```
+
+### Error: "Project not set"
+Especifica el PROJECT_ID explícitamente:
+```bash
+./deploy.sh dev TU_PROJECT_ID
+```
+
+### Error: "Terraform backend bucket not found"
+Ejecuta primero el script de setup:
+```bash
+./setup.sh TU_PROJECT_ID
+```
+
+### Error al construir imagen
+Cloud Build necesita la API habilitada. El script `setup.sh` la habilita automáticamente.
+
+## 📚 Documentación Adicional
+
+- [Documentación de Arquitectura](../Documentation/ARCHITECTURE.md)
+- [Guía de Despliegue Completa](../Documentation/DEPLOY_GUIDE.md)
+- [Infraestructura Terraform](../infrastructure/terraform/README.md)
+
+---
+
+**Última actualización**: 2025-12-15  
+**Versión**: 2.0.0 - Simplificado para Google Cloud Shell
 
 ## 🚀 RECOMENDADO: Despliegue Desde Cloud Shell
 

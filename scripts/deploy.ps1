@@ -37,7 +37,7 @@ function Write-Error-Custom {
 }
 
 # Variables
-$TfVarsFile = "env\$Environment.tfvars"
+$TfVarsFile = "infrastructure\terraform\env\$Environment.tfvars"
 $PlanFile = "$Environment.tfplan"
 
 # Validar que el archivo tfvars existe

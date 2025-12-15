@@ -1,50 +1,64 @@
 """
-Apolo Document Processing Microservice
+Apolo Document Processing Microservice - Procesamiento Inteligente de Preavalúos
 
-Architectural Overview:
-- Serverless Cloud Run service for financial document intelligence
-- Designed for dual invocation: direct HTTP or orchestrated via Cloud Workflows
-- Implements idempotency through Firestore to prevent duplicate processing costs
-- Bridges storage (GCS) with AI processing (Document AI ready) and persistence (Firestore)
+Arquitectura alineada con especificación:
+- Serverless Cloud Run service activado por Eventarc en eventos de GCS
+- Trigger: archivo sentinel 'is_ready' (0 bytes, sin extensión)
+- Procesamiento paralelo de documentos con Document AI (Classifier + Extractor)
+- Idempotencia completa usando GCS generation + content hashing
+- Persistencia en Firestore: folios/{folioId}/documentos/{docId}/extracciones/{extractionId}
+- DLQ integration para documentos fallidos via Pub/Sub
+- Reintentos con backoff exponencial
 
-Integration Patterns:
-- Mode 1: Direct HTTP invocation for simple client integration
-- Mode 2: Cloud Workflows orchestration for complex flows with retries and OIDC auth
-- Supports both individual document processing and batch folder operations
+Patrón de Activación:
+- Eventarc escucha eventos 'object.finalize' de GCS
+- Trigger solo en archivo 'is_ready' sentinel
+- Procesa todos los PDFs en la carpeta automáticamente
+- Idempotencia por carpeta y por documento (generation)
 """
 
 import os
 import json
 import uuid
 import time
-import random
-import logging
 import hashlib
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import jsonify
 import functions_framework
 from google.cloud import storage
 from google.cloud import firestore
+from google.cloud import documentai_v1 as documentai
+from google.cloud import pubsub_v1
 
+import logging
 logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION: Variables de entorno para servicios GCP y límites de procesamiento
+# ═══════════════════════════════════════════════════════════════════════════════
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
+LOCATION = os.environ.get("PROCESSOR_LOCATION", "us")
+CLASSIFIER_PROCESSOR_ID = os.environ.get("CLASSIFIER_PROCESSOR_ID", "")
+EXTRACTOR_PROCESSOR_ID = os.environ.get("EXTRACTOR_PROCESSOR_ID", "")
+DLQ_TOPIC_NAME = os.environ.get("DLQ_TOPIC_NAME", "apolo-preavaluo-dlq")
+MAX_CONCURRENT_DOCS = int(os.environ.get("MAX_CONCURRENT_DOCS", "8"))
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
+RETRY_INITIAL_DELAY = float(os.environ.get("RETRY_INITIAL_DELAY", "1.0"))
+RETRY_MULTIPLIER = float(os.environ.get("RETRY_MULTIPLIER", "2.0"))
+RETRY_MAX_DELAY = float(os.environ.get("RETRY_MAX_DELAY", "60.0"))
+FIRESTORE_DATABASE = os.environ.get("FIRESTORE_DATABASE", "(default)")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# DOMAIN MODEL: Error handling strategy ensures all failures return structured
-# error responses (HTTP 500) with specific error codes for client debugging
-# ═════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOMAIN MODEL: Error handling
+# ═══════════════════════════════════════════════════════════════════════════════
 class AppError(Exception):
-    def __init__(
-        self,
-        code: str,
-        message: str,
-        *,
-        stage: str,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def __init__(self, code: str, message: str, *, stage: str, details: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.code = code
         self.message = message
@@ -52,10 +66,9 @@ class AppError(Exception):
         self.details = details or {}
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# UTILITIES: Defensive programming layer that normalizes external inputs and
-# generates deterministic identifiers for traceability across distributed systems
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITIES: Funciones auxiliares
+# ═══════════════════════════════════════════════════════════════════════════════
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -71,1235 +84,611 @@ def _normalize_prefix(prefix: Any) -> str:
     return p
 
 
-def _safe_int(value: Any, default: int) -> int:
-    try:
-        v = int(value)
-        return v if v > 0 else default
-    except Exception:
-        return default
+def _make_folio_id(bucket: str, folder_prefix: str) -> str:
+    """Genera folio_id a partir del bucket y folder_prefix."""
+    if folder_prefix:
+        # Usar el primer segmento del folder_prefix como ID
+        parts = folder_prefix.strip("/").split("/")
+        return parts[0] if parts else f"FOLIO-{uuid.uuid4().hex[:8]}"
+    return f"FOLIO-{uuid.uuid4().hex[:8]}"
 
 
-def _make_run_id(data: Dict[str, Any]) -> str:
-    """Establishes correlation ID strategy: reuse workflow execution ID when orchestrated,
-    generate unique ID for direct invocations. Enables end-to-end traceability across
-    microservices and workflow engines."""
-    v = str(data.get("workflow_execution_id", "") or "").strip()
-    if v:
-        return v
-    return f"run-{uuid.uuid4().hex}"
-
-
-def _make_doc_id(folio_id: str, file_id: str) -> str:
-    """Generates deterministic document identifier through content-based hashing.
-    Critical for idempotency: same document always produces same ID, enabling
-    deduplication checks in Firestore to avoid reprocessing costs."""
-    combined = f"{folio_id}:{file_id}"
+def _make_doc_id(folio_id: str, file_id: str, generation: Optional[str] = None) -> str:
+    """Genera ID determinístico con folio + file + generation para idempotencia."""
+    if generation:
+        combined = f"{folio_id}:{file_id}:{generation}"
+    else:
+        combined = f"{folio_id}:{file_id}"
     return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
 
-def _is_valid_pdf(blob_name: str, storage_client: storage.Client, bucket_name: str) -> Tuple[bool, str]:
-    """Early validation gate to prevent expensive Document AI processing on invalid files.
-    Uses magic byte inspection (PDF header signature) to fail fast before AI invocation,
-    reducing costs and providing clear client feedback.
+def _exponential_backoff_delay(attempt: int) -> float:
+    """Calcula delay con backoff exponencial."""
+    delay = RETRY_INITIAL_DELAY * (RETRY_MULTIPLIER ** attempt)
+    return min(delay, RETRY_MAX_DELAY)
+
+
+def _json_log(payload: Dict[str, Any]) -> None:
+    """Logging estructurado en JSON para Cloud Logging."""
+    logging.info(json.dumps(payload, ensure_ascii=False))
+
+
+def _parse_eventarc_event(request: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Parse Eventarc CloudEvent para extraer detalles del evento de GCS.
     
     Returns:
-        Tuple[bool, str]: (es_valido, mensaje_error)
+        (bucket_name, object_name, event_id) o (None, None, None)
     """
+    try:
+        event_data = request.get_json()
+        if not event_data:
+            return None, None, None
+            
+        event_id = event_data.get("id", "")
+        data = event_data.get("data", {})
+        bucket_name = data.get("bucket", "")
+        object_name = data.get("name", "")
+        
+        if not bucket_name or not object_name:
+            return None, None, None
+            
+        return bucket_name, object_name, event_id
+    except Exception as e:
+        logger.error(f"Error parsing Eventarc event: {e}")
+        return None, None, None
+
+
+def _is_ready_sentinel(object_name: str) -> Tuple[bool, str]:
+    """Valida si el objeto es un archivo sentinel 'is_ready' válido.
+    
+    Reglas:
+    - Debe terminar en '/is_ready' o ser exactamente 'is_ready'
+    - Sin extensión
+    
+    Returns:
+        (is_valid, folder_prefix)
+    """
+    if not object_name:
+        return False, ""
+    
+    if object_name.endswith("/is_ready"):
+        folder_prefix = object_name[:-9]  # Remove '/is_ready'
+        return True, folder_prefix
+    elif object_name == "is_ready":
+        return True, ""
+    
+    return False, ""
+
+
+def _publish_to_dlq(folio_id: str, gcs_uri: str, error_type: str, error_message: str,
+                    attempts: int, details: Optional[Dict[str, Any]] = None) -> None:
+    """Publica documento fallido al Dead Letter Queue para revisión manual."""
+    try:
+        if not PROJECT_ID or not DLQ_TOPIC_NAME:
+            logger.warning("DLQ not configured, skipping publish")
+            return
+            
+        publisher = pubsub_v1.PublisherClient()
+        topic_path = publisher.topic_path(PROJECT_ID, DLQ_TOPIC_NAME)
+        
+        message_data = {
+            "folio_id": folio_id,
+            "gcs_uri": gcs_uri,
+            "error_type": error_type,
+            "error_message": error_message,
+            "attempts": attempts,
+            "timestamp": _utc_iso(),
+            "details": details or {},
+        }
+        
+        message_bytes = json.dumps(message_data).encode("utf-8")
+        future = publisher.publish(topic_path, message_bytes)
+        future.result(timeout=5.0)
+        
+        logger.info(f"Published to DLQ: {gcs_uri}")
+    except Exception as e:
+        logger.error(f"Failed to publish to DLQ: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GCS INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+def _list_pdfs_in_folder(bucket_name: str, folder_prefix: str) -> List[Tuple[str, str]]:
+    """Lista todos los PDFs en una carpeta de GCS con sus generation numbers.
+    
+    Returns:
+        List[(blob_name, generation)]
+    """
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blobs = bucket.list_blobs(prefix=folder_prefix)
+        
+        pdfs = []
+        for blob in blobs:
+            if blob.name.lower().endswith(".pdf") and not blob.name.endswith("/"):
+                pdfs.append((blob.name, str(blob.generation)))
+        
+        return pdfs
+    except Exception as e:
+        logger.error(f"Error listing PDFs: {e}")
+        raise AppError(
+            code="GCS_LIST_ERROR",
+            message=f"Failed to list PDFs in folder: {e}",
+            stage="LIST_FOLDER",
+            details={"bucket": bucket_name, "folder_prefix": folder_prefix}
+        )
+
+
+def _is_valid_pdf(blob_name: str, storage_client: storage.Client, bucket_name: str) -> Tuple[bool, str]:
+    """Valida PDF mediante magic bytes (%PDF-)."""
     try:
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
-        
-        # Leer primeros 5 bytes para verificar magic number de PDF: %PDF-
         header = blob.download_as_bytes(start=0, end=5)
         
         if header == b'%PDF-':
             return True, ""
         else:
             return False, f"Invalid PDF header. Expected '%PDF-', got: {header[:10]}"
-            
     except Exception as e:
         return False, f"Error reading file: {str(e)}"
 
 
-def _infer_preavaluo_id(folder_prefix: str, provided: Any) -> str:
-    p = str(provided or "").strip()
-    if p:
-        return p
-    if folder_prefix:
-        return folder_prefix.split("/")[0] or "SIM-000"
-    return "SIM-000"
-
-
-def _json_log(payload: Dict[str, Any]) -> None:
-    """Structured logging strategy for Cloud Logging integration. JSON format enables
-    querying, filtering, and correlation in GCP's observability stack. Critical for
-    debugging distributed workflows and tracking document processing lifecycle."""
-    logging.info(json.dumps(payload, ensure_ascii=False))
-
-
-def _log_progress(
-    *,
-    run_id: str,
-    preavaluo_id: str,
-    bucket: str,
-    folder_prefix: str,
-    step: str,
-    percent: int,
-    extra: Optional[Dict[str, Any]] = None,
-) -> None:
-    payload: Dict[str, Any] = {
-        "event_type": "progress",
-        "ts_utc": _utc_iso(),
-        "run_id": run_id,
-        "preavaluo_id": preavaluo_id,
-        "bucket": bucket,
-        "folder_prefix": folder_prefix,
-        "step": step,
-        "percent": int(percent),
-    }
-    if extra:
-        payload.update(extra)
-    _json_log(payload)
-
-
-def _error_response(
-    *,
-    run_id: str,
-    preavaluo_id: str,
-    bucket: str,
-    folder_prefix: str,
-    stage: str,
-    code: str,
-    message: str,
-    details: Optional[Dict[str, Any]] = None,
-    partial_results: Optional[List[Dict[str, Any]]] = None,
-) -> Tuple[Any, int]:
-    """Standardized error contract for client integration. Always returns HTTP 500
-    with structured error metadata including stage, code, and partial results.
-    Design enables clients to implement granular retry logic and debugging."""
-    body: Dict[str, Any] = {
-        "status": "error",
-        "run_id": run_id,
-        "preavaluo_id": preavaluo_id,
-        "bucket": bucket,
-        "folder_prefix": folder_prefix,
-        "document_count": 0,
-        "results": partial_results or [],
-        "error": {
-            "stage": stage,
-            "code": code,
-            "message": message,
-            "details": details or {},
-            "ts_utc": _utc_iso(),
-        },
-    }
-    return jsonify(body), 500
-
-
-def _success_response(
-    *,
-    run_id: str,
-    preavaluo_id: str,
-    bucket: str,
-    folder_prefix: str,
-    results: List[Dict[str, Any]],
-    status: str,
-) -> Tuple[Any, int]:
-    body: Dict[str, Any] = {
-        "status": status,
-        "run_id": run_id,
-        "preavaluo_id": preavaluo_id,
-        "bucket": bucket,
-        "folder_prefix": folder_prefix,
-        "document_count": len(results),
-        "results": results,
-    }
-    return jsonify(body), 200
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# DOCUMENT AI SIMULATION LAYER: Decouples business logic from AI service integration.
-# These functions simulate Document AI's classifier and extractor APIs, enabling
-# development, testing, and cost estimation without production AI calls. Designed as
-# drop-in replacements - swap with real Document AI client calls in production.
-# Fail-safe design: never throws exceptions to ensure pipeline resilience.
-# ═════════════════════════════════════════════════════════════════════════════
-def simulate_classification(file_name: str) -> Dict[str, Any]:
-    """Simulates Document AI's classification processor for financial statement categorization.
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOCUMENT AI INTEGRATION con reintentos
+# ═══════════════════════════════════════════════════════════════════════════════
+def _process_document_ai_with_retry(processor_name: str, gcs_uri: str) -> Optional[documentai.Document]:
+    """Procesa documento con Document AI con reintentos automáticos."""
+    if not PROJECT_ID or not processor_name:
+        logger.warning("Document AI not configured")
+        return None
+        
+    client = documentai.DocumentProcessorServiceClient()
     
-    Categorías:
-    - ESTADO_RESULTADOS: Estado de Resultados / Profit & Loss
-    - ESTADO_SITUACION_FINANCIERA: Balance General / Statement of Financial Position
-    - ESTADO_FLUJOS_EFECTIVO: Estado de Flujos de Efectivo / Cash Flow Statement
-    """
-    categories = [
-        "ESTADO_RESULTADOS",
-        "ESTADO_SITUACION_FINANCIERA", 
-        "ESTADO_FLUJOS_EFECTIVO"
-    ]
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Leer documento desde GCS
+            storage_client = storage.Client()
+            bucket_name, blob_name = gcs_uri.replace("gs://", "").split("/", 1)
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            content = blob.download_as_bytes()
+            
+            raw_document = documentai.RawDocument(content=content, mime_type="application/pdf")
+            request = documentai.ProcessRequest(name=processor_name, raw_document=raw_document)
+            
+            result = client.process_document(request=request)
+            return result.document
+            
+        except Exception as e:
+            logger.warning(f"Document AI attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+            if attempt < MAX_RETRIES - 1:
+                delay = _exponential_backoff_delay(attempt)
+                logger.info(f"Retrying in {delay:.2f} seconds...")
+                time.sleep(delay)
+            else:
+                logger.error(f"Document AI failed after {MAX_RETRIES} attempts")
+                return None
+    
+    return None
+
+
+def classify_document(gcs_uri: str) -> Dict[str, Any]:
+    """Clasifica documento usando Document AI Classifier."""
     try:
-        doc_type = random.choice(categories)
+        if not CLASSIFIER_PROCESSOR_ID:
+            return {"document_type": "UNKNOWN", "confidence": 0.0, "classifier_version": "not_configured"}
+        
+        processor_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{CLASSIFIER_PROCESSOR_ID}"
+        document = _process_document_ai_with_retry(processor_name, gcs_uri)
+        
+        if not document:
+            return {"document_type": "UNKNOWN", "confidence": 0.0, "classifier_version": "error"}
+        
+        doc_type = "UNKNOWN"
+        confidence = 0.0
+        
+        for entity in document.entities:
+            if entity.type_ in ["ESTADO_RESULTADOS", "ESTADO_SITUACION_FINANCIERA", "ESTADO_FLUJOS_EFECTIVO"]:
+                doc_type = entity.type_
+                confidence = entity.confidence
+                break
+        
         return {
             "document_type": doc_type,
-            "confidence": round(random.uniform(0.85, 0.99), 3),
-            "classifier_version": "document-ai-classifier-v1",
+            "confidence": round(confidence, 3),
+            "classifier_version": processor_name,
         }
-    except Exception:
+    except Exception as e:
+        logger.error(f"Classification error: {e}")
         return {"document_type": "UNKNOWN", "confidence": 0.0, "classifier_version": "error"}
 
 
-def simulate_extraction(file_name: str, category: str) -> Dict[str, Any]:
-    """Simulates Document AI's custom extraction processor with schema-aligned output.
-    
-    Business Context: Produces realistic financial statement data matching Document AI's
-    entity extraction format. The schema mirrors production output structure, ensuring
-    downstream consumers (analytics, validation logic) work identically in dev/prod.
-    
-    Design: Type-specific field generation maintains referential integrity (e.g.,
-    balance sheet assets = liabilities + equity) for realistic test scenarios.
-    """
+def extract_document_data(gcs_uri: str, doc_type: str) -> Dict[str, Any]:
+    """Extrae datos estructurados con Document AI Extractor con trazabilidad completa."""
     try:
-        # Campos comunes para todos los documentos
-        common_fields = {
-            "ORG_NAME": "Apolo Solutions S.A. de C.V.",
-            "REPORTING_PERIOD": f"{random.randint(2020, 2024)}-12-31",
-            "CURRENCY": "MXN",
-            "UNITS_SCALE": random.choice(["MILES", "MILLONES", "UNIDADES"]),
+        if not EXTRACTOR_PROCESSOR_ID:
+            return _generate_fallback_extraction()
+        
+        processor_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{EXTRACTOR_PROCESSOR_ID}"
+        document = _process_document_ai_with_retry(processor_name, gcs_uri)
+        
+        if not document:
+            return _generate_fallback_extraction()
+        
+        fields = {}
+        line_items = []
+        
+        for entity in document.entities:
+            text_value = entity.mention_text if hasattr(entity, 'mention_text') else ""
+            confidence = entity.confidence if hasattr(entity, 'confidence') else 0.0
+            
+            # Extraer page_refs y bounding boxes
+            page_refs = []
+            if hasattr(entity, 'page_anchor') and entity.page_anchor:
+                for page_ref in entity.page_anchor.page_refs:
+                    page_info = {"page": page_ref.page if hasattr(page_ref, 'page') else 0}
+                    if hasattr(page_ref, 'bounding_poly') and page_ref.bounding_poly:
+                        vertices = [{"x": v.x, "y": v.y} for v in page_ref.bounding_poly.normalized_vertices]
+                        page_info["bounding_box"] = vertices
+                    page_refs.append(page_info)
+            
+            field_data = {
+                "value": text_value,
+                "confidence": round(confidence, 3),
+                "page_refs": page_refs,
+            }
+            
+            # Organizar por tipo de entidad
+            entity_type = entity.type_
+            if entity_type in ["LINE_ITEM_NAME", "LINE_ITEM_VALUE", "COLUMN_YEAR",
+                              "SECTION_HEADER", "TOTAL_LABEL"]:
+                line_items.append({"type": entity_type, **field_data})
+            else:
+                fields[entity_type] = field_data
+        
+        if line_items:
+            fields["line_items"] = line_items
+        
+        return {
+            "fields": fields,
+            "metadata": {
+                "page_count": len(document.pages) if hasattr(document, 'pages') else 0,
+                "processor_version": processor_name,
+                "extraction_schema_version": "v1.0",
+            }
         }
-        
-        # Simular años para columnas
-        base_year = random.randint(2020, 2024)
-        years = [str(base_year - 1), str(base_year)]
-        
-        # Campos específicos por tipo de documento
-        if category == "ESTADO_RESULTADOS":
-            line_items = [
-                {"LINE_ITEM_NAME": "Ventas Netas", "LINE_ITEM_VALUE": round(random.uniform(1000000, 5000000), 2), "COLUMN_YEAR": years[1]},
-                {"LINE_ITEM_NAME": "Costo de Ventas", "LINE_ITEM_VALUE": round(random.uniform(500000, 2000000), 2), "COLUMN_YEAR": years[1]},
-                {"LINE_ITEM_NAME": "Utilidad Bruta", "LINE_ITEM_VALUE": round(random.uniform(500000, 3000000), 2), "COLUMN_YEAR": years[1], "TOTAL_LABEL": "SUBTOTAL"},
-                {"LINE_ITEM_NAME": "Gastos de Operación", "LINE_ITEM_VALUE": round(random.uniform(200000, 1000000), 2), "COLUMN_YEAR": years[1]},
-                {"LINE_ITEM_NAME": "EBITDA", "LINE_ITEM_VALUE": round(random.uniform(300000, 2000000), 2), "COLUMN_YEAR": years[1], "TOTAL_LABEL": "TOTAL"},
-                {"LINE_ITEM_NAME": "Utilidad Neta", "LINE_ITEM_VALUE": round(random.uniform(100000, 1500000), 2), "COLUMN_YEAR": years[1], "TOTAL_LABEL": "TOTAL"},
-            ]
-            common_fields.update({
-                "STATEMENT_TITLE": "Estado de Resultados",
-                "line_items": line_items,
-            })
-            
-        elif category == "ESTADO_SITUACION_FINANCIERA":
-            line_items = [
-                {"LINE_ITEM_NAME": "Efectivo y Equivalentes", "LINE_ITEM_VALUE": round(random.uniform(100000, 1000000), 2), "COLUMN_YEAR": years[1], "SECTION_HEADER": "ACTIVO CIRCULANTE"},
-                {"LINE_ITEM_NAME": "Cuentas por Cobrar", "LINE_ITEM_VALUE": round(random.uniform(200000, 1500000), 2), "COLUMN_YEAR": years[1]},
-                {"LINE_ITEM_NAME": "Inventarios", "LINE_ITEM_VALUE": round(random.uniform(300000, 2000000), 2), "COLUMN_YEAR": years[1]},
-                {"LINE_ITEM_NAME": "Total Activo Circulante", "LINE_ITEM_VALUE": round(random.uniform(600000, 4500000), 2), "COLUMN_YEAR": years[1], "TOTAL_LABEL": "SUBTOTAL"},
-                {"LINE_ITEM_NAME": "Activo Fijo", "LINE_ITEM_VALUE": round(random.uniform(1000000, 5000000), 2), "COLUMN_YEAR": years[1], "SECTION_HEADER": "ACTIVO NO CIRCULANTE"},
-                {"LINE_ITEM_NAME": "Total Activo", "LINE_ITEM_VALUE": round(random.uniform(2000000, 10000000), 2), "COLUMN_YEAR": years[1], "TOTAL_LABEL": "TOTAL"},
-                {"LINE_ITEM_NAME": "Pasivo Total", "LINE_ITEM_VALUE": round(random.uniform(800000, 4000000), 2), "COLUMN_YEAR": years[1], "SECTION_HEADER": "PASIVO"},
-                {"LINE_ITEM_NAME": "Capital Contable", "LINE_ITEM_VALUE": round(random.uniform(1200000, 6000000), 2), "COLUMN_YEAR": years[1], "SECTION_HEADER": "CAPITAL"},
-            ]
-            common_fields.update({
-                "STATEMENT_TITLE": "Estado de Situación Financiera",
-                "line_items": line_items,
-            })
-            
-        elif category == "ESTADO_FLUJOS_EFECTIVO":
-            line_items = [
-                {"LINE_ITEM_NAME": "Flujos de Operación", "LINE_ITEM_VALUE": round(random.uniform(200000, 1500000), 2), "COLUMN_YEAR": years[1], "SECTION_HEADER": "ACTIVIDADES DE OPERACION"},
-                {"LINE_ITEM_NAME": "Flujos de Inversión", "LINE_ITEM_VALUE": round(random.uniform(-500000, -100000), 2), "COLUMN_YEAR": years[1], "SECTION_HEADER": "ACTIVIDADES DE INVERSION"},
-                {"LINE_ITEM_NAME": "Flujos de Financiamiento", "LINE_ITEM_VALUE": round(random.uniform(-300000, 300000), 2), "COLUMN_YEAR": years[1], "SECTION_HEADER": "ACTIVIDADES DE FINANCIAMIENTO"},
-                {"LINE_ITEM_NAME": "Incremento Neto en Efectivo", "LINE_ITEM_VALUE": round(random.uniform(50000, 500000), 2), "COLUMN_YEAR": years[1], "TOTAL_LABEL": "TOTAL"},
-            ]
-            common_fields.update({
-                "STATEMENT_TITLE": "Estado de Flujos de Efectivo",
-                "line_items": line_items,
-            })
-        else:
-            # Fallback para tipos desconocidos
-            line_items = []
-            common_fields.update({
-                "STATEMENT_TITLE": "Documento No Clasificado",
-                "line_items": line_items,
-            })
+    except Exception as e:
+        logger.error(f"Extraction error: {e}")
+        return _generate_fallback_extraction()
 
-        # Metadata de Document AI
-        metadata = {
-            "page_count": random.randint(1, 5),
-            "processor_version": "projects/PROJECT_ID/locations/us/processors/PROCESSOR_ID/processorVersions/VERSION_ID",
+
+def _generate_fallback_extraction() -> Dict[str, Any]:
+    """Genera extracción mínima cuando Document AI no está disponible."""
+    return {
+        "fields": {},
+        "metadata": {
+            "page_count": 0,
+            "processor_version": "fallback",
             "extraction_schema_version": "v1.0",
-            "mime_type": "application/pdf",
-            "decision_path": "DOCUMENT_AI",
-            "table_references": [
-                {
-                    "TABLE_COLUMN_HEADER": years,
-                    "TABLE_ROW_REF": [item["LINE_ITEM_NAME"] for item in line_items[:5]],
-                }
-            ],
         }
-        
-        return {"fields": common_fields, "metadata": metadata}
-        
-    except Exception as e:
-        logging.error(f"Error in simulate_extraction: {e}")
-        return {"fields": {}, "metadata": {"decision_path": "SIMULATED_ERROR", "error": str(e)}}
+    }
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# FIRESTORE PERSISTENCE LAYER: Implements idempotency and state management through
-# a hierarchical document model (runs > documents). Critical for:
-# - Cost optimization: prevents reprocessing of already-analyzed documents
-# - Auditability: maintains complete processing history with timestamps
-# - Resilience: enables recovery from partial failures without data loss
-# - Scalability: supports concurrent processing with lease-based coordination
-# ═════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# FIRESTORE PERSISTENCE: Esquema jerárquico según spec
+# folios/{folioId}/documentos/{docId}/extracciones/{extractionId}
+# ═══════════════════════════════════════════════════════════════════════════════
 def _get_firestore_client() -> firestore.Client:
-    """Obtiene cliente de Firestore con la base de datos configurada."""
-    database_id = os.environ.get("FIRESTORE_DATABASE", "(default)")
-    return firestore.Client(database=database_id)
+    return firestore.Client(database=FIRESTORE_DATABASE)
 
 
-def _ensure_run_document(
-    db: firestore.Client,
-    run_id: str,
-    preavaluo_id: str,
-    bucket_name: str,
-    folder_prefix: str,
-) -> None:
-    """Establishes processing batch context in Firestore for aggregate tracking.
-    
-    Business Purpose: Groups related document processing operations under a single
-    run entity, enabling batch-level metrics (total/processed/failed counts) and
-    status tracking. Critical for client dashboards and workflow orchestration.
-    
-    Estructura: runs/{runId}
-    """
+def _ensure_folio_document(db: firestore.Client, folio_id: str, bucket: str, folder_prefix: str) -> None:
+    """Crea o actualiza documento de folio en Firestore."""
     try:
-        run_ref = db.collection("runs").document(run_id)
-        run_doc = run_ref.get()
+        folio_ref = db.collection("folios").document(folio_id)
+        folio_doc = folio_ref.get()
         
-        if not run_doc.exists:
-            # Crear documento de run
-            run_ref.set({
-                "runId": run_id,
-                "preavaluo_id": preavaluo_id,
-                "sourceBucket": f"gs://{bucket_name}",
-                "folderPrefix": folder_prefix,
-                "status": "processing",
-                "documentCount": 0,
-                "processedCount": 0,
-                "failedCount": 0,
-                "createdAt": firestore.SERVER_TIMESTAMP,
-                "updatedAt": firestore.SERVER_TIMESTAMP,
+        if not folio_doc.exists:
+            folio_ref.set({
+                "bucket": bucket,
+                "folder_prefix": folder_prefix,
+                "status": "PROCESSING",
+                "total_docs": 0,
+                "processed_docs": 0,
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "started_at": firestore.SERVER_TIMESTAMP,
             })
         else:
-            # Actualizar timestamp
-            run_ref.update({
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-                "status": "processing",
+            folio_ref.update({
+                "status": "PROCESSING",
+                "started_at": firestore.SERVER_TIMESTAMP,
+                "last_update_at": firestore.SERVER_TIMESTAMP,
             })
     except Exception as e:
-        logging.error(f"Error ensuring run document: {e}")
+        logger.error(f"Error creating folio document: {e}")
 
 
-def _check_and_acquire_lease(
-    db: firestore.Client,
-    run_id: str,
-    doc_id: str,
-    folio_id: str,
-    file_id: str,
-    gcs_uri: str,
-) -> Tuple[bool, Optional[Dict[str, Any]]]:
-    """Implements distributed idempotency through optimistic concurrency control.
-    
-    Business Logic: Prevents duplicate Document AI processing costs by checking Firestore
-    cache before invoking AI services. Uses time-based lease expiration (10 min) to
-    handle stale locks from crashed processes. Fail-open design ensures availability
-    over strict consistency.
+def _check_document_processed(db: firestore.Client, folio_id: str, doc_id: str) -> Tuple[bool, Optional[Dict]]:
+    """Verifica si un documento ya fue procesado (idempotencia).
     
     Returns:
-        Tuple[bool, Optional[Dict]]: (should_process, cached_result_if_exists)
+        (already_processed, cached_data)
     """
     try:
-        doc_ref = db.collection("runs").document(run_id).collection("documents").document(doc_id)
-        doc = doc_ref.get()
+        doc_ref = db.collection("folios").document(folio_id).collection("documentos").document(doc_id)
+        doc_snap = doc_ref.get()
         
-        if doc.exists:
-            data = doc.to_dict()
-            if data is None:
-                data = {}
-            status = data.get("status")
-            
-            # Si ya está procesado exitosamente, retornar resultado desde cache
-            if status == "completed":
-                logging.info(f"Document {doc_id} already processed (cache hit)")
-                return False, data
-            
-            # Si está en proceso pero hace más de 10 min, permitir reintentar
-            if status == "processing":
-                processing_since = data.get("processingStartedAt") if data else None
-                if processing_since:
-                    elapsed = (datetime.now(timezone.utc) - processing_since).total_seconds()
-                    if elapsed < 600:  # 10 minutos
-                        logging.warning(f"Document {doc_id} still processing (lease active)")
-                        return False, {"status": "already_processing", "runId": data.get("runId") if data else None}
+        if doc_snap.exists:
+            data = doc_snap.to_dict()
+            if data.get("status") == "DONE":
+                return True, data
         
-        # Adquirir lease
-        doc_ref.set({
-            "docId": doc_id,
-            "runId": run_id,
-            "folioId": folio_id,
-            "fileId": file_id,
-            "gcsUri": gcs_uri,
-            "status": "processing",
-            "processingStartedAt": firestore.SERVER_TIMESTAMP,
-            "createdAt": firestore.SERVER_TIMESTAMP,
-        }, merge=True)
-        
-        logging.info(f"Lease acquired for document {doc_id}")
-        return True, None
-        
+        return False, None
     except Exception as e:
-        logging.error(f"Error checking/acquiring lease: {e}")
-        # En caso de error, permitir procesamiento (fail-open)
-        return True, None
+        logger.error(f"Error checking document: {e}")
+        return False, None
 
 
-def _persist_result(
-    db: firestore.Client,
-    run_id: str,
-    doc_id: str,
-    folio_id: str,
-    file_id: str,
-    gcs_uri: str,
-    classification: Dict[str, Any],
-    extraction: Dict[str, Any],
-    status: str = "completed",
-    error: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Atomic persistence of complete Document AI processing results for auditability.
-    
-    Architecture: Stores full classification + extraction output in hierarchical Firestore
-    structure. Enables future queries for analytics, reprocessing decisions, and
-    compliance audits. Updates aggregate run-level counters for dashboard integration.
-    Non-throwing design ensures processing pipeline continues even if persistence fails.
-    
-    Estructura jerárquica:
-    runs/{runId}/documents/{docId}
-    
-    Campos guardados:
-    - Clasificación (document_type, confidence, classifier_version)
-    - Extracción (fields completos según tipo de documento)
-    - Metadata de Document AI (processor_version, extraction_schema_version)
-    - Timestamps y status
-    """
+def _persist_document_result(db: firestore.Client, folio_id: str, doc_id: str, file_id: str, 
+                             gcs_uri: str, generation: str, classification: Dict[str, Any],
+                             extraction: Dict[str, Any], status: str, error: Optional[Dict] = None) -> None:
+    """Persiste resultado de documento con estructura jerárquica completa."""
     try:
-        # Referencia al documento dentro del run
-        doc_ref = db.collection("runs").document(run_id).collection("documents").document(doc_id)
+        doc_ref = db.collection("folios").document(folio_id).collection("documentos").document(doc_id)
         
-        # Preparar documento con toda la información
-        result = {
-            "docId": doc_id,
-            "runId": run_id,
-            "folioId": folio_id,
-            "fileId": file_id,
-            "gcsUri": gcs_uri,
+        doc_data = {
+            "gcs_uri": gcs_uri,
+            "generation": generation,
+            "file_id": file_id,
             "status": status,
-            
-            # Clasificación de Document AI
-            "classification": {
-                "documentType": classification.get("document_type", "UNKNOWN"),
-                "confidence": classification.get("confidence", 0.0),
-                "classifierVersion": classification.get("classifier_version", "unknown"),
-            },
-            
-            # Extracción completa de Document AI
-            "extraction": {
+            "doc_type": classification.get("document_type", "UNKNOWN"),
+            "classifier_confidence": classification.get("confidence", 0.0),
+            "classifier_version": classification.get("classifier_version", ""),
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        
+        if status == "DONE":
+            doc_data["completed_at"] = firestore.SERVER_TIMESTAMP
+        
+        if error:
+            doc_data["error_type"] = error.get("code", "")
+            doc_data["error_message"] = error.get("message", "")
+        
+        doc_ref.set(doc_data, merge=True)
+        
+        # Guardar extracción en sub-colección
+        if extraction and extraction.get("fields"):
+            extraction_id = f"extraction-{_utc_iso()}"
+            extraction_ref = doc_ref.collection("extracciones").document(extraction_id)
+            extraction_ref.set({
                 "fields": extraction.get("fields", {}),
                 "metadata": extraction.get("metadata", {}),
-            },
-            
-            # Timestamps
-            "processedAt": firestore.SERVER_TIMESTAMP,
-            "updatedAt": firestore.SERVER_TIMESTAMP,
-        }
-        
-        # Agregar error si existe
-        if error:
-            result["error"] = error
-            result["status"] = "failed"
-        
-        # Guardar documento
-        doc_ref.set(result, merge=True)
-        
-        # Actualizar contadores en el run principal
-        run_ref = db.collection("runs").document(run_id)
-        if status == "completed":
-            run_ref.update({
-                "processedCount": firestore.Increment(1),
-                "documentCount": firestore.Increment(1),
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-            })
-        elif status == "failed":
-            run_ref.update({
-                "failedCount": firestore.Increment(1),
-                "documentCount": firestore.Increment(1),
-                "updatedAt": firestore.SERVER_TIMESTAMP,
+                "created_at": firestore.SERVER_TIMESTAMP,
             })
         
-        logging.info(f"Document {doc_id} persisted successfully with status: {status}")
+        # Actualizar contadores del folio
+        folio_ref = db.collection("folios").document(folio_id)
+        folio_ref.update({
+            "processed_docs": firestore.Increment(1),
+            "last_update_at": firestore.SERVER_TIMESTAMP,
+        })
         
     except Exception as e:
-        logging.error(f"Error persisting result to Firestore: {e}")
-        # No levantamos excepción para no fallar el procesamiento completo
+        logger.error(f"Error persisting document: {e}")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# CORE PROCESSING PIPELINE: Orchestrates the complete document intelligence workflow
-# for a single document. Implements the idempotency check -> AI processing ->
-# persistence pattern. Designed as the atomic unit of work for both individual and
-# batch processing modes.
-# ═════════════════════════════════════════════════════════════════════════════
-def _process_single_document(
-    *,
-    storage_client: storage.Client,
-    db: firestore.Client,
-    run_id: str,
-    bucket_name: str,
-    blob_name: str,
-    folio_id: str,
-    file_id: str,
-) -> Dict[str, Any]:
-    """
-    Executes the full document intelligence pipeline with idempotency protection.
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOCUMENT PROCESSING: Con procesamiento paralelo
+# ═══════════════════════════════════════════════════════════════════════════════
+def _process_single_document(folio_id: str, file_name: str, generation: str, bucket_name: str, 
+                             db: firestore.Client) -> Dict[str, Any]:
+    """Procesa un documento individual con manejo de errores y reintentos."""
+    file_id = file_name.split("/")[-1]
+    doc_id = _make_doc_id(folio_id, file_id, generation)
+    gcs_uri = f"gs://{bucket_name}/{file_name}"
     
-    Returns:
-        Dict con status, classification, extraction, from_cache, etc.
-    """
-    # Generar docId único basado en folio y archivo
-    doc_id = _make_doc_id(folio_id, file_id)
-    
-    # Construir URI de GCS
-    gcs_uri = f"gs://{bucket_name}/{blob_name}"
-    
-    # Verificar idempotencia y lease
-    can_process, cached_result = _check_and_acquire_lease(
-        db=db,
-        run_id=run_id,
-        doc_id=doc_id,
-        folio_id=folio_id,
-        file_id=file_id,
-        gcs_uri=gcs_uri,
-    )
-    
-    if not can_process and cached_result:
-        # Ya está procesado - retornar desde cache
-        return {
-            "file_name": file_id,
-            "status": "processed",
-            "from_cache": True,
-            "classification": cached_result.get("classification", {}),
-            "extraction": cached_result.get("extraction", {}),
-        }
-    
-    # Procesar el documento
     try:
-        # Obtener blob de GCS
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
+        # Verificar idempotencia
+        already_processed, cached = _check_document_processed(db, folio_id, doc_id)
+        if already_processed:
+            logger.info(f"Document already processed (from cache): {file_id}")
+            return {
+                "file_name": file_name,
+                "gcs_uri": gcs_uri,
+                "status": "DONE",
+                "from_cache": True,
+                "doc_type": cached.get("doc_type", "UNKNOWN"),
+            }
         
-        if not blob.exists():
+        # Validar PDF
+        storage_client = storage.Client()
+        is_valid, error_msg = _is_valid_pdf(file_name, storage_client, bucket_name)
+        if not is_valid:
             raise AppError(
-                code="BLOB_NOT_FOUND",
-                message=f"Blob not found: {blob_name}",
-                stage="DOWNLOAD",
-                details={"bucket": bucket_name, "blob": blob_name},
+                code="INVALID_PDF",
+                message=error_msg,
+                stage="VALIDATION",
+                details={"file": file_name}
             )
         
-        # 1. Clasificación
-        classification = simulate_classification(file_id)
+        # Clasificar
+        logger.info(f"Classifying: {file_id}")
+        classification = classify_document(gcs_uri)
         
-        # 2. Extracción
-        extraction = simulate_extraction(
-            file_name=file_id,
-            category=classification.get("documentType", "UNKNOWN")
-        )
+        # Extraer
+        logger.info(f"Extracting: {file_id}")
+        extraction = extract_document_data(gcs_uri, classification["document_type"])
         
-        # 3. Persistir resultado
-        _persist_result(
-            db=db,
-            run_id=run_id,
-            doc_id=doc_id,
-            folio_id=folio_id,
-            file_id=file_id,
-            gcs_uri=gcs_uri,
-            classification=classification,
-            extraction=extraction,
+        # Persistir
+        _persist_document_result(
+            db, folio_id, doc_id, file_id, gcs_uri, generation,
+            classification, extraction, "DONE"
         )
         
         return {
-            "file_name": file_id,
-            "status": "processed",
+            "file_name": file_name,
+            "gcs_uri": gcs_uri,
+            "status": "DONE",
             "from_cache": False,
-            "classification": classification,
-            "extraction": extraction,
+            "doc_type": classification["document_type"],
+            "confidence": classification["confidence"],
         }
         
-    except AppError:
-        raise
     except Exception as e:
         logger.error(f"Error processing {file_id}: {e}")
-        raise AppError(
-            code="PROCESSING_ERROR",
-            message=f"Error processing document: {str(e)}",
-            stage="PROCESSING",
-            details={"file": file_id, "exception": str(e)},
+        
+        # Persistir error
+        _persist_document_result(
+            db, folio_id, doc_id, file_id, gcs_uri, generation,
+            {"document_type": "UNKNOWN", "confidence": 0.0},
+            {}, "ERROR",
+            error={"code": "PROCESSING_ERROR", "message": str(e)}
         )
+        
+        # Publicar a DLQ
+        _publish_to_dlq(folio_id, gcs_uri, "PROCESSING_ERROR", str(e), MAX_RETRIES)
+        
+        return {
+            "file_name": file_name,
+            "gcs_uri": gcs_uri,
+            "status": "ERROR",
+            "error": str(e),
+        }
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# GCS INTEGRATION LAYER: Abstracts Google Cloud Storage operations with fail-fast
-# error handling. Implements filtering and pagination to prevent runaway costs from
-# large buckets. Converts GCS exceptions to domain-specific AppErrors for consistent
-# client error handling.
-# ═════════════════════════════════════════════════════════════════════════════
-def _list_object_names(
-    *,
-    bucket_name: str,
-    prefix: str,
-    allowed_exts: Set[str],
-    max_items: int,
-) -> List[str]:
-    """Discovers documents in GCS bucket with extension filtering and size limits.
-    Critical for batch processing: max_items prevents accidental processing of
-    entire large buckets that could exhaust quotas or budget."""
-    # Si algo falla aquí, levantamos AppError con código específico
+def _process_documents_parallel(folio_id: str, documents: List[Tuple[str, str]], 
+                                bucket_name: str, db: firestore.Client) -> List[Dict[str, Any]]:
+    """Procesa múltiples documentos en paralelo con ThreadPoolExecutor."""
+    results = []
+    
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DOCS) as executor:
+        # Submit all tasks
+        future_to_doc = {
+            executor.submit(_process_single_document, folio_id, file_name, generation, bucket_name, db): (file_name, generation)
+            for file_name, generation in documents
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_doc):
+            file_name, generation = future_to_doc[future]
+            try:
+                result = future.result()
+                results.append(result)
+                logger.info(f"Completed: {file_name} - Status: {result['status']}")
+            except Exception as e:
+                logger.error(f"Failed to process {file_name}: {e}")
+                results.append({
+                    "file_name": file_name,
+                    "status": "ERROR",
+                    "error": str(e),
+                })
+    
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT: Eventarc handler
+# ═══════════════════════════════════════════════════════════════════════════════
+@functions_framework.cloud_event
+def process_folder_on_ready(cloud_event):
+    """
+    Punto de entrada principal activado por Eventarc.
+    
+    Se activa cuando se crea un archivo 'is_ready' en GCS, lo que indica que
+    una carpeta está lista para ser procesada completamente.
+    """
     try:
-        client = storage.Client()
-        names: List[str] = []
-
-        for blob in client.list_blobs(bucket_name, prefix=prefix):
-            name = (blob.name or "").strip()
-            if not name:
-                continue
-            if name.endswith("/"):
-                continue
-
-            lower = name.lower()
-            if allowed_exts and not any(lower.endswith(ext) for ext in allowed_exts):
-                continue
-
-            names.append(name)
-            if len(names) >= max_items:
-                break
-
-        return names
-
-    except Exception as e:
-        raise AppError(
-            code="GCS_LIST_FAILED",
-            message="Failed to list objects from GCS.",
-            stage="LIST_BUCKET",
-            details={
-                "bucket": bucket_name,
-                "prefix": prefix,
-                "exception": str(e),
-            },
-        )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# HTTP ENTRY POINT: Main request handler supporting three invocation modes:
-# 1. Batch processing with fileList (Document AI native format)
-# 2. Individual document via gcs_pdf_uri (workflow integration)
-# 3. Folder batch via folder_prefix (legacy support)
-#
-# Architecture: Designed for dual deployment as standalone HTTP service or as
-# Cloud Workflows step. Comprehensive error handling ensures all code paths return
-# structured JSON (success: 200, all errors: 500 with error codes).
-# ═════════════════════════════════════════════════════════════════════════════
-@functions_framework.http
-def document_processor(request: Any):
-    """Main request handler orchestrating document intelligence pipeline across all modes."""
-    # Defaults para que SIEMPRE podamos responder con forma estable
-    bucket_name = os.environ.get("BUCKET_NAME", "preavaluos-pdf")
-    folder_prefix = ""
-    preavaluo_id = "SIM-000"
-    run_id = f"run-{uuid.uuid4().hex}"
-    folio_id = ""
-    file_id = ""
-
-    try:
-        if request.method != "POST":
-            # Según tu regla: error => 500
-            return _error_response(
-                run_id=run_id,
-                preavaluo_id=preavaluo_id,
-                bucket=bucket_name,
-                folder_prefix=folder_prefix,
-                stage="VALIDATION",
-                code="METHOD_NOT_ALLOWED",
-                message="Only POST is allowed.",
-                details={"method": request.method},
-            )
-
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict):
-            data = {}
-
-        # Parámetros según spec: 
-        # - Formato NUEVO: runId, preavaluo_id, fileList (Document AI batch)
-        # - Formato LEGACY: folioId, fileId, gcs_pdf_uri, workflow_execution_id
-        run_id = data.get("runId") or _make_run_id(data)
-        file_list = data.get("fileList", [])  # Nuevo formato
+        # Parse event data
+        event_data = cloud_event.get_data()
+        bucket_name = event_data.get("bucket", "")
+        object_name = event_data.get("name", "")
+        event_id = cloud_event.get("id", "")
         
-        folio_id = str(data.get("folioId", "") or "").strip()
-        file_id = str(data.get("fileId", "") or "").strip()
-        gcs_pdf_uri = str(data.get("gcs_pdf_uri", "") or "").strip()
+        logger.info(f"Event received: {event_id} - Object: {object_name}")
         
-        # Mantener compatibilidad con folder_prefix para listar múltiples archivos
-        folder_prefix = _normalize_prefix(data.get("folder_prefix", ""))
-        preavaluo_id = data.get("preavaluo_id") or folio_id or _infer_preavaluo_id(folder_prefix, data.get("preavaluo_id"))
-
-        # Establish observability baseline for request tracking
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="START",
-            percent=0,
-        )
-
-        # ─────────────────────────────────────────────────────────────────────
-        # Request routing logic: supports three invocation patterns for flexibility
-        # 1) fileList: Document AI batch format (production standard)
-        # 2) gcs_pdf_uri: single document for workflow integration
-        # 3) folder_prefix: batch discovery mode for folder scanning
-        # ─────────────────────────────────────────────────────────────────────
-        if not file_list and not gcs_pdf_uri and not folder_prefix:
-            raise AppError(
-                code="MISSING_REQUIRED_PARAMS",
-                message="Either fileList, gcs_pdf_uri, or folder_prefix is required.",
-                stage="VALIDATION",
-                details={"expected": "fileList (batch) or gcs_pdf_uri (individual) or folder_prefix (batch)"},
-            )
+        # Validar que es un archivo is_ready
+        is_valid, folder_prefix = _is_ready_sentinel(object_name)
+        if not is_valid:
+            logger.info(f"Not an is_ready file, ignoring: {object_name}")
+            return "OK - Not is_ready file", 200
         
-        # Si es procesamiento individual, validar parámetros completos
-        if gcs_pdf_uri and (not folio_id or not file_id):
-            raise AppError(
-                code="MISSING_REQUIRED_PARAMS",
-                message="folioId and fileId are required when using gcs_pdf_uri.",
-                stage="VALIDATION",
-                details={"provided": {"folioId": folio_id, "fileId": file_id}},
-            )
-
-        # Inicializar clientes
-        storage_client = storage.Client()
+        logger.info(f"Processing folder: {folder_prefix} in bucket: {bucket_name}")
+        
+        # Generar folio_id
+        folio_id = _make_folio_id(bucket_name, folder_prefix)
+        
+        # Inicializar Firestore
         db = _get_firestore_client()
+        _ensure_folio_document(db, folio_id, bucket_name, folder_prefix)
         
-        # Crear/actualizar documento de run en Firestore
-        _ensure_run_document(db, run_id, preavaluo_id, bucket_name, folder_prefix)
+        # Log structured de inicio
+        _json_log({
+            "event_type": "folder_processing_start",
+            "folio_id": folio_id,
+            "bucket": bucket_name,
+            "folder_prefix": folder_prefix,
+            "event_id": event_id,
+            "timestamp": _utc_iso(),
+        })
         
-        # ═════════════════════════════════════════════════════════════════════════
-        # MODE 1: Document AI Batch Processing (Production Pattern)
-        # Processes pre-specified list of documents, enabling integration with
-        # Document AI Batch API and external orchestration systems. Each document
-        # processed independently with individual error handling for partial success.
-        # ═════════════════════════════════════════════════════════════════════════
-        if file_list:
-            if not isinstance(file_list, list):
-                raise AppError(
-                    code="INVALID_FILE_LIST",
-                    message="fileList must be an array",
-                    stage="VALIDATION",
-                    details={"provided_type": str(type(file_list))},
-                )
-            
-            results = []
-            for file_item in file_list:
-                if not isinstance(file_item, dict):
-                    continue
-                
-                item_gcs_uri = file_item.get("gcsUri", "")
-                item_file_name = file_item.get("file_name", "")
-                
-                if not item_gcs_uri or not item_gcs_uri.startswith("gs://"):
-                    continue
-                
-                # Extraer bucket y blob
-                parts = item_gcs_uri[5:].split("/", 1)
-                if len(parts) != 2:
-                    continue
-                
-                item_bucket = parts[0]
-                blob_name = parts[1]
-                
-                # Generar IDs para este documento
-                item_folio_id = preavaluo_id
-                item_file_id = item_file_name or blob_name.split("/")[-1]
-                
-                # Procesar documento
-                try:
-                    result = _process_single_document(
-                        storage_client=storage_client,
-                        db=db,
-                        run_id=run_id,
-                        bucket_name=item_bucket,
-                        blob_name=blob_name,
-                        folio_id=item_folio_id,
-                        file_id=item_file_id,
-                    )
-                    results.append(result)
-                except Exception as e:
-                    logger.error(f"Error processing {blob_name}: {e}")
-                    results.append({
-                        "file_name": item_file_name,
-                        "status": "error",
-                        "error": str(e),
-                    })
-            
-            # Actualizar run con resultados finales
-            run_ref = db.collection("runs").document(run_id)
-            processed_count = sum(1 for r in results if r.get("status") == "processed")
-            failed_count = len(results) - processed_count
-            
-            run_ref.update({
-                "status": "completed",
-                "processedCount": processed_count,
-                "failedCount": failed_count,
-                "updatedAt": firestore.SERVER_TIMESTAMP,
+        # Listar todos los PDFs en la carpeta
+        documents = _list_pdfs_in_folder(bucket_name, folder_prefix)
+        total_docs = len(documents)
+        
+        logger.info(f"Found {total_docs} PDF documents in folder")
+        
+        # Actualizar total_docs en Firestore
+        db.collection("folios").document(folio_id).update({
+            "total_docs": total_docs,
+        })
+        
+        if total_docs == 0:
+            logger.info("No documents to process")
+            db.collection("folios").document(folio_id).update({
+                "status": "DONE",
+                "finished_at": firestore.SERVER_TIMESTAMP,
             })
-            
-            return jsonify({
-                "status": "completed",
-                "runId": run_id,
-                "preavaluo_id": preavaluo_id,
-                "bucket": item_bucket if file_list else bucket_name,
-                "document_count": len(results),
-                "processedCount": processed_count,
-                "failedCount": failed_count,
-                "results": results,
-            }), 200
+            return "OK - No documents", 200
         
-        # ═════════════════════════════════════════════════════════════════════════
-        # MODE 2: Individual Document Processing (Workflow Integration)
-        # Direct processing of single document specified by GCS URI. Optimized for
-        # Cloud Workflows orchestration where each workflow step processes one document.
-        # ═════════════════════════════════════════════════════════════════════════
-        elif gcs_pdf_uri:
-            # Extraer bucket y blob name de gs://bucket/path/file.pdf
-            if not gcs_pdf_uri.startswith("gs://"):
-                raise AppError(
-                    code="INVALID_GCS_URI",
-                    message="gcs_pdf_uri must start with gs://",
-                    stage="VALIDATION",
-                    details={"provided": gcs_pdf_uri},
-                )
-            
-            parts = gcs_pdf_uri[5:].split("/", 1)
-            if len(parts) != 2:
-                raise AppError(
-                    code="INVALID_GCS_URI",
-                    message="Invalid gcs_pdf_uri format",
-                    stage="VALIDATION",
-                    details={"provided": gcs_pdf_uri},
-                )
-            
-            bucket_name = parts[0]
-            blob_name = parts[1]
-            object_names = [blob_name]
-            
+        # Procesar documentos en paralelo
+        results = _process_documents_parallel(folio_id, documents, bucket_name, db)
+        
+        # Determinar estado final
+        errors = [r for r in results if r.get("status") == "ERROR"]
+        if errors:
+            final_status = "DONE_WITH_ERRORS"
         else:
-            # ═════════════════════════════════════════════════════════════════════════
-            # MODE 3: Folder Discovery (Legacy Batch Support)
-            # Lists all documents in GCS folder prefix for processing. Useful for
-            # bulk processing scenarios where document list isn't pre-determined.
-            # Includes extension filtering and size limits for cost control.
-            # ═════════════════════════════════════════════════════════════════════════
-            extensions = data.get("extensions") or [".pdf"]
-            allowed_exts = {str(x).lower().strip() for x in extensions if str(x).strip()}
-            max_items = _safe_int(data.get("max_items"), default=500)
-
-            # 20%: listando bucket
-            _log_progress(
-                run_id=run_id,
-                preavaluo_id=preavaluo_id,
-                bucket=bucket_name,
-                folder_prefix=folder_prefix,
-                step="LIST_BUCKET_START",
-                percent=20,
-                extra={"max_items": max_items, "extensions": sorted(list(allowed_exts))},
-            )
-
-            object_names = _list_object_names(
-                bucket_name=bucket_name,
-                prefix=folder_prefix,
-                allowed_exts=allowed_exts,
-                max_items=max_items,
-            )
-
-        total_files = len(object_names)
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="LIST_BUCKET_DONE",
-            percent=20,
-            extra={"total_files": total_files},
-        )
-
-        # Sin archivos: lo tratamos como éxito (200) con status no_files
-        if total_files == 0:
-            _log_progress(
-                run_id=run_id,
-                preavaluo_id=preavaluo_id,
-                bucket=bucket_name,
-                folder_prefix=folder_prefix,
-                step="DONE_NO_FILES",
-                percent=100,
-            )
-            return _success_response(
-                run_id=run_id,
-                preavaluo_id=preavaluo_id,
-                bucket=bucket_name,
-                folder_prefix=folder_prefix,
-                results=[],
-                status="no_files",
-            )
-
-        # ─────────────────────────────────────────────────────────────────────
-        # PDF Validation Gate: fail-fast strategy to prevent expensive AI processing
-        # on corrupt or non-PDF files. Magic byte inspection is cheap; Document AI
-        # processing is expensive. Early rejection provides clear client feedback.
-        # ─────────────────────────────────────────────────────────────────────
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="VALIDATE_PDF_START",
-            percent=30,
-            extra={"total_files": total_files},
-        )
+            final_status = "DONE"
         
-        valid_pdfs: List[str] = []
-        invalid_files: List[Dict[str, Any]] = []
-        
-        for idx, name in enumerate(object_names, start=1):
-            is_valid, error_msg = _is_valid_pdf(name, storage_client, bucket_name)
-            
-            if is_valid:
-                valid_pdfs.append(name)
-            else:
-                _json_log({
-                    "event_type": "progress_detail",
-                    "ts_utc": _utc_iso(),
-                    "run_id": run_id,
-                    "step": "INVALID_PDF",
-                    "file_name": name,
-                    "error": error_msg,
-                })
-                invalid_files.append({
-                    "file_name": name,
-                    "error": {"code": "INVALID_PDF_FORMAT", "message": error_msg},
-                })
-        
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="VALIDATE_PDF_DONE",
-            percent=35,
-            extra={"valid_pdfs": len(valid_pdfs), "invalid_files": len(invalid_files)},
-        )
-        
-        # Si no hay PDFs válidos, retornar error
-        if len(valid_pdfs) == 0:
-            return _error_response(
-                run_id=run_id,
-                preavaluo_id=preavaluo_id,
-                bucket=bucket_name,
-                folder_prefix=folder_prefix,
-                stage="VALIDATION",
-                code="NO_VALID_PDFS",
-                message="No valid PDF files found.",
-                details={"invalid_files": invalid_files},
-            )
-
-        # ─────────────────────────────────────────────────────────────────────
-        # Classification Phase: determines document type (Income Statement, Balance
-        # Sheet, Cash Flow) to route to appropriate extraction processor. In production,
-        # this invokes Document AI Classifier; currently simulated for development.
-        # ─────────────────────────────────────────────────────────────────────
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="CLASSIFY_START",
-            percent=40,
-            extra={"total_files": len(valid_pdfs)},
-        )
-
-        classifications: Dict[str, Dict[str, Any]] = {}
-        for idx, name in enumerate(valid_pdfs, start=1):
-            try:
-                classifications[name] = simulate_classification(name)
-                _json_log({
-                    "event_type": "progress_detail",
-                    "ts_utc": _utc_iso(),
-                    "run_id": run_id,
-                    "step": "CLASSIFY_ITEM",
-                    "current_file": idx,
-                    "total_files": len(valid_pdfs),
-                    "file_name": name,
-                })
-                time.sleep(0.02)
-            except Exception as e:
-                # Blindaje por archivo (si pasa algo raro)
-                _json_log({
-                    "event_type": "progress_detail",
-                    "ts_utc": _utc_iso(),
-                    "run_id": run_id,
-                    "step": "CLASSIFY_ITEM_ERROR",
-                    "file_name": name,
-                    "exception": str(e),
-                })
-                classifications[name] = {"document_type": "UNKNOWN", "confidence": 0.0}
-
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="CLASSIFY_DONE",
-            percent=60,
-            extra={"total_files": len(valid_pdfs)},
-        )
-
-        # ─────────────────────────────────────────────────────────────────────
-        # Extraction & Persistence Phase: core intelligence pipeline that extracts
-        # structured data from documents and persists to Firestore. Implements
-        # idempotency checks to leverage cached results. Per-document error handling
-        # ensures partial batch success rather than all-or-nothing failures.
-        # ─────────────────────────────────────────────────────────────────────
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="EXTRACT_START",
-            percent=70,
-            extra={"total_files": len(valid_pdfs)},
-        )
-
-        results: List[Dict[str, Any]] = []
-        had_item_errors = False
-
-        for idx, name in enumerate(valid_pdfs, start=1):
-            try:
-                # Generar ID único para este documento
-                current_folio = folio_id if folio_id else preavaluo_id
-                current_file_id = file_id if file_id else name.split("/")[-1]
-                doc_id = _make_doc_id(current_folio, current_file_id)
-                gcs_uri = f"gs://{bucket_name}/{name}"
-                
-                # Verificar si ya fue procesado (idempotencia)
-                can_process, cached_result = _check_and_acquire_lease(
-                    db, run_id, doc_id, current_folio, current_file_id, gcs_uri
-                )
-                
-                if not can_process and cached_result and cached_result.get("status") == "completed":
-                    # Usar resultado desde cache
-                    results.append({
-                        "file_name": name,
-                        "gcs_uri": gcs_uri,
-                        "classification": cached_result.get("classification", {}),
-                        "extraction": cached_result.get("extraction", {}),
-                        "processed_at": cached_result.get("processedAt", _utc_iso()),
-                        "from_cache": True,
-                    })
-                    logging.info(f"Using cached result for {name}")
-                    continue
-                
-                # Procesar documento nuevo
-                c = classifications.get(name) or {"document_type": "UNKNOWN", "confidence": 0.0}
-                e = simulate_extraction(name, str(c.get("document_type", "UNKNOWN")))
-                
-                # Persistir en Firestore
-                _persist_result(
-                    db=db,
-                    run_id=run_id,
-                    doc_id=doc_id,
-                    folio_id=current_folio,
-                    file_id=current_file_id,
-                    gcs_uri=gcs_uri,
-                    classification=c,
-                    extraction=e,
-                    status="completed",
-                )
-                
-                results.append({
-                    "file_name": name,
-                    "gcs_uri": gcs_uri,
-                    "classification": c,
-                    "extraction": e,
-                    "processed_at": datetime.now(timezone.utc).isoformat(),
-                    "from_cache": False,
-                })
-
-                _json_log({
-                    "event_type": "progress_detail",
-                    "ts_utc": _utc_iso(),
-                    "run_id": run_id,
-                    "step": "EXTRACT_ITEM",
-                    "current_file": idx,
-                    "total_files": total_files,
-                    "file_name": name,
-                    "doc_id": doc_id,
-                })
-                time.sleep(0.02)
-
-            except Exception as e:
-                had_item_errors = True
-                current_folio = folio_id if folio_id else preavaluo_id
-                current_file_id = file_id if file_id else name.split("/")[-1]
-                doc_id = _make_doc_id(current_folio, current_file_id)
-                gcs_uri = f"gs://{bucket_name}/{name}"
-                
-                _json_log({
-                    "event_type": "progress_detail",
-                    "ts_utc": _utc_iso(),
-                    "run_id": run_id,
-                    "step": "EXTRACT_ITEM_ERROR",
-                    "file_name": name,
-                    "doc_id": doc_id,
-                    "exception": str(e),
-                })
-                
-                # Persistir error en Firestore
-                _persist_result(
-                    db=db,
-                    run_id=run_id,
-                    doc_id=doc_id,
-                    folio_id=current_folio,
-                    file_id=current_file_id,
-                    gcs_uri=gcs_uri,
-                    classification={"document_type": "UNKNOWN", "confidence": 0.0},
-                    extraction={"fields": {}, "metadata": {"decision_path": "ERROR"}},
-                    status="failed",
-                    error={"code": "FILE_PROCESS_FAILED", "message": str(e)},
-                )
-                
-                # Guardamos un resultado "marcado" para que el output sea consistente
-                results.append({
-                    "file_name": name,
-                    "gcs_uri": gcs_uri,
-                    "classification": {"document_type": "UNKNOWN", "confidence": 0.0},
-                    "extraction": {"fields": {}, "metadata": {"decision_path": "ERROR"}},
-                    "processed_at": datetime.now(timezone.utc).isoformat(),
-                    "from_cache": False,
-                    "error": {"code": "FILE_PROCESS_FAILED", "message": str(e)},
-                })
-
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="EXTRACT_DONE",
-            percent=80,
-            extra={"total_files": total_files},
-        )
-
-        # ─────────────────────────────────────────────────────────────────────
-        # Finalization: update run-level status for dashboard integration and
-        # determine response code. Partial failures return 500 (client should inspect
-        # results array) while complete success returns 200. Non-critical errors in
-        # status update don't fail the entire operation (eventual consistency).
-        # ─────────────────────────────────────────────────────────────────────
-        try:
-            run_ref = db.collection("runs").document(run_id)
-            run_ref.update({
-                "status": "completed" if not had_item_errors else "partial_failure",
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-            })
-        except Exception as e:
-            logging.error(f"Error updating run status: {e}")
-        
-        _log_progress(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            step="DONE",
-            percent=100,
-            extra={"document_count": len(results), "had_errors": had_item_errors},
-        )
-
-        # Si hubo errores por archivo, lo consideramos error global (500),
-        # para cumplir “éxito=200 / error=500”.
-        if had_item_errors:
-            return _error_response(
-                run_id=run_id,
-                preavaluo_id=preavaluo_id,
-                bucket=bucket_name,
-                folder_prefix=folder_prefix,
-                stage="PROCESSING",
-                code="PARTIAL_FAILURE",
-                message="Some files failed to process.",
-                details={"document_count": len(results)},
-                partial_results=results,
-            )
-
-        return _success_response(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            results=results,
-            status="processed",
-        )
-
-    except AppError as e:
-        _json_log({
-            "event_type": "error",
-            "ts_utc": _utc_iso(),
-            "run_id": run_id,
-            "stage": e.stage,
-            "code": e.code,
-            "message": e.message,
-            "details": e.details,
+        # Actualizar estado final del folio
+        db.collection("folios").document(folio_id).update({
+            "status": final_status,
+            "finished_at": firestore.SERVER_TIMESTAMP,
         })
-        return _error_response(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            stage=e.stage,
-            code=e.code,
-            message=e.message,
-            details=e.details,
-        )
-
+        
+        # Log structured de finalización
+        _json_log({
+            "event_type": "folder_processing_complete",
+            "folio_id": folio_id,
+            "bucket": bucket_name,
+            "folder_prefix": folder_prefix,
+            "total_docs": total_docs,
+            "successful": len([r for r in results if r.get("status") == "DONE"]),
+            "errors": len(errors),
+            "final_status": final_status,
+            "timestamp": _utc_iso(),
+        })
+        
+        logger.info(f"Folder processing complete - Status: {final_status}")
+        return "OK", 200
+        
     except Exception as e:
-        # Catch-all blindado
+        logger.error(f"Fatal error processing folder: {e}")
         _json_log({
-            "event_type": "error",
-            "ts_utc": _utc_iso(),
-            "run_id": run_id,
-            "stage": "UNEXPECTED",
-            "code": "UNEXPECTED_ERROR",
-            "message": str(e),
+            "event_type": "folder_processing_error",
+            "error": str(e),
+            "timestamp": _utc_iso(),
         })
-        return _error_response(
-            run_id=run_id,
-            preavaluo_id=preavaluo_id,
-            bucket=bucket_name,
-            folder_prefix=folder_prefix,
-            stage="UNEXPECTED",
-            code="UNEXPECTED_ERROR",
-            message="Unexpected server error.",
-            details={"exception": str(e)},
-        )
+        return f"Error: {e}", 500

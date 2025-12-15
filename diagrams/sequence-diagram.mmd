@@ -1,0 +1,31 @@
+sequenceDiagram
+    autonumber
+
+    participant WF as Cloud Workflow
+    participant CR as Cloud Run Job
+    participant GCS as Cloud Storage
+    participant CL as Document AI Classifier
+    participant EX as Document AI Extractor
+    participant FS as Firestore
+
+    WF->>CR: invoke(runId, folderPrefix)
+    CR->>FS: create runs/{runId} (status=processing)
+
+    CR->>GCS: list PDFs in folderPrefix
+    loop per file
+        CR->>FS: upsert documents/{docId} (status=processing)
+
+        CR->>GCS: download PDF
+
+        CR->>CL: classify PDF
+        CL-->>CR: classification result
+
+        CR->>EX: extract structured fields
+        EX-->>CR: extraction blocks + anchors
+
+        CR->>FS: update documents/{docId} (completed)
+        CR->>FS: increment counters in runs/{runId}
+    end
+
+    CR->>FS: update runs/{runId} (status=completed)
+    CR-->>WF: return processing summary

@@ -1,1069 +1,727 @@
-# Apolo - Financial Document Processing Service
+# Apolo Procesamiento Inteligente - Preavalúo
 
-Intelligent document processing microservice for financial statement analysis.
+> **⚡ Actualización de Scripts (Dic 2025)**: Los scripts de despliegue han sido simplificados y optimizados para Google Cloud Shell. Ver [scripts/README.md](scripts/README.md) para la guía actualizada.
+
+## Terraform Infrastructure as Code
+
+Infrastructure automation for Apolo document processing service on Google Cloud Platform.
+
+## 🚀 Inicio Rápido
+
+Para desplegar la aplicación completa desde Google Cloud Shell:
+
+```bash
+# 1. Configuración inicial (primera vez)
+cd scripts
+./setup.sh TU_PROJECT_ID
+
+# 2. Despliegue completo
+./deploy.sh dev TU_PROJECT_ID
+```
+
+Ver documentación completa en [scripts/README.md](scripts/README.md)
+
+---
 
 ## Overview
 
-Cloud Run service that processes PDF financial documents from Google Cloud Storage using a three-stage pipeline:
-1. **PDF Validation** - Verifies valid PDF format using magic byte inspection
-2. **Classification** - Identifies document type (Income Statement, Balance Sheet, Cash Flow)
-3. **Extraction** - Extracts structured financial data fields
-4. **Persistence** - Stores results in Firestore with idempotency
-
-## Quick Links
-
-📚 **Documentation**
-- [Architecture Overview](Documentation/ARCHITECTURE.md) - System design and data flow
-- [Infrastructure Summary](Documentation/INFRASTRUCTURE.md) - Complete infrastructure details
-- [Deployment Checklist](Documentation/DEPLOYMENT_CHECKLIST.md) - Pre-deployment verification
-- [GCP Commands Reference](Documentation/GCP_COMMANDS.md) - Essential gcloud commands
-- [Firestore Schema](Documentation/FIRESTORE_SCHEMA.md) - Database structure
-- [Testing Guide](Documentation/TESTING.md) - Test procedures
-- [Quick Start](Documentation/QUICKSTART.md) - Get started in 5 minutes
-
-🚀 **Deployment**
-- [Terraform IaC](infrastructure/terraform/README.md) - Infrastructure as Code
-- [PowerShell Scripts](scripts/powershell/README.md) - Windows deployment
-- [Bash Scripts](scripts/bash/README.md) - Linux/Mac deployment
-
-## Technical Specifications
-
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| **Runtime** | Python | 3.11 |
-| **Framework** | Flask + functions-framework | 3.x |
-| **Platform** | Cloud Run (Gen 2) | Latest |
-| **Region** | us-south1 (Dallas) | - |
-| **Storage** | Cloud Storage | - |
-| **Database** | Firestore (Native mode) | - |
-| **Auth** | Service Account + OIDC | - |
-
-## Architecture
-
-### Deployment Modes
-
-**Mode 1: Direct HTTP Invocation**
-```
-Client → HTTP POST → Cloud Run → GCS + Firestore
-```
-✅ Simple integration  
-✅ Synchronous responses  
-✅ Ideal for development/testing  
-
-**Mode 2: Cloud Workflows Orchestration**
-```
-Client → Cloud Workflows → OIDC Auth → Cloud Run → GCS + Firestore
-```
-✅ Complex workflow orchestration  
-✅ Automatic retries with backoff  
-✅ Production-grade reliability  
-
-### Processing Modes
-
-| Mode | Input | Use Case |
-|------|-------|----------|
-| **Individual** | Single `gcs_pdf_uri` | Process one document |
-| **Batch (List)** | Array of `fileList` | Document AI batch format |
-| **Batch (Folder)** | `folder_prefix` | Discover and process all PDFs in folder |
-
-## API Contract
-
-### Request Format
-
-**Individual Document:**
-```json
-{
-  "folioId": "PRE-2025-001",
-  "fileId": "balance.pdf",
-  "gcs_pdf_uri": "gs://preavaluos-pdf/PRE-2025-001/balance.pdf",
-  "workflow_execution_id": "optional-correlation-id"
-}
-```
-
-**Batch Processing (Folder):**
-```json
-{
-  "folder_prefix": "PRE-2025-001/",
-  "preavaluo_id": "PRE-2025-001",
-  "extensions": [".pdf"],
-  "max_items": 500
-}
-```
-
-**Batch Processing (File List):**
-```json
-{
-  "runId": "custom-run-id",
-  "fileList": [
-    {"gcsUri": "gs://bucket/file1.pdf", "file_name": "doc1.pdf"},
-    {"gcsUri": "gs://bucket/file2.pdf", "file_name": "doc2.pdf"}
-  ]
-}
-```
-
-### Response Format
-
-**Success (HTTP 200):**
-```json
-{
-  "status": "processed",
-  "run_id": "wf-abc123",
-  "preavaluo_id": "PRE-2025-001",
-  "bucket": "preavaluos-pdf",
-  "document_count": 2,
-  "processedCount": 2,
-  "failedCount": 0,
-  "results": [
-    {
-      "file_name": "balance.pdf",
-      "status": "processed",
-      "from_cache": false,
-      "classification": {
-        "documentType": "ESTADO_SITUACION_FINANCIERA",
-        "confidence": 0.95,
-        "classifierVersion": "v1"
-      },
-      "extraction": {
-        "fields": {
-          "ORG_NAME": "Apolo Solutions S.A.",
-          "REPORTING_PERIOD": "2024-12-31",
-          "CURRENCY": "MXN",
-          "line_items": [...]
-        },
-        "metadata": {...}
-      }
-    }
-  ]
-}
-```
-
-**Error (HTTP 500):**
-```json
-{
-  "status": "error",
-  "run_id": "wf-abc123",
-  "error": {
-    "stage": "VALIDATION",
-    "code": "INVALID_PDF_FORMAT",
-    "message": "Invalid PDF header",
-    "details": {...},
-    "ts_utc": "2025-12-04T10:30:00Z"
-  }
-}
-```
-
-## Document Types
-
-The service classifies financial documents into three categories:
-
-| Type | Description | Spanish Name |
-|------|-------------|--------------|
-| `ESTADO_RESULTADOS` | Income Statement / Profit & Loss | Estado de Resultados |
-| `ESTADO_SITUACION_FINANCIERA` | Balance Sheet | Balance General |
-| `ESTADO_FLUJOS_EFECTIVO` | Cash Flow Statement | Estado de Flujos de Efectivo |
-
-### Extracted Fields
-
-Each document type extracts specific structured fields:
-- **Common**: Organization name, reporting period, currency, units scale
-- **Line Items**: Account names, values, years, section headers, totals
-- **Metadata**: Page count, processor version, table references
-
-See [Firestore Schema](Documentation/FIRESTORE_SCHEMA.md) for complete field definitions.
-
-## Idempotency & Caching
-
-### Firestore Structure
-```
-firestore (database: apolo-preavaluos-dev)
-└── runs/
-    └── {runId}/
-        ├── status, documentCount, processedCount, failedCount
-        └── documents/
-            └── {docId}/  # SHA-256 hash of folioId:fileId
-                ├── classification
-                ├── extraction
-                └── status
-```
-
-### How It Works
-1. Generate deterministic `docId` from `folioId:fileId`
-2. Check Firestore for existing result
-3. If found and completed → return cached result (`from_cache: true`)
-4. If not found → process document and persist
-5. Lease mechanism prevents concurrent processing (10-minute timeout)
-
-**Benefits:**
-- Prevents duplicate processing costs
-- Instant responses for re-requested documents
-- Complete audit trail
-- Safe for retries
-
-## Deployment
-
-### Option 1: Automated Scripts (Recommended)
-
-**PowerShell (Windows):**
-```powershell
-cd scripts/powershell
-.\deploy-complete.ps1
-```
-
-**Bash (Linux/Mac/Cloud Shell):**
-```bash
-cd scripts/bash
-./deploy-cloudrun.sh
-```
-
-**Features:**
-- Enables required APIs
-- Creates GCS bucket and Firestore database
-- Builds and deploys container
-- Runs test suite
-- ~5-7 minutes end-to-end
-
-### Option 2: Terraform (Infrastructure as Code)
-
-```bash
-cd infrastructure/terraform
-terraform init
-terraform apply -var-file="env/dev.tfvars"
-```
-
-**See:** [Terraform README](infrastructure/terraform/README.md)
-
-### Option 3: Manual gcloud
-
-```bash
-# Deploy from source
-gcloud run deploy apolo-procesamiento-inteligente \
-  --source . \
-  --region us-south1 \
-  --set-env-vars BUCKET_NAME=preavaluos-pdf,FIRESTORE_DATABASE=apolo-preavaluos-dev
-
-# Or deploy from pre-built image
-gcloud run deploy apolo-procesamiento-inteligente \
-  --image gcr.io/PROJECT_ID/apolo-procesamiento-inteligente:latest \
-  --region us-south1
-```
-
-**See:** [GCP Commands Reference](Documentation/GCP_COMMANDS.md)
-
-## Testing
-
-### Quick Test
-```bash
-SERVICE_URL="https://your-service-url.run.app"
-
-curl -X POST "${SERVICE_URL}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "gcs_pdf_uri": "gs://preavaluos-pdf/test.pdf",
-    "folioId": "TEST-001",
-    "fileId": "test.pdf"
-  }'
-```
-
-### Test Suite
-```bash
-# PowerShell
-.\scripts\powershell\test-cloudrun.ps1
-
-# Bash
-./scripts/bash/test-cloudrun.sh
-```
-
-**See:** [Testing Guide](Documentation/TESTING.md) for comprehensive test scenarios
-
-## Monitoring
-
-### View Logs
-```bash
-gcloud logging tail "resource.type=cloud_run_revision"
-```
-
-### Error Logs Only
-```bash
-gcloud logging read "resource.type=cloud_run_revision AND severity>=ERROR" --limit 20
-```
-
-### Structured Log Format
-```json
-{
-  "event_type": "progress",
-  "ts_utc": "2025-12-04T10:30:00Z",
-  "run_id": "wf-abc123",
-  "step": "CLASSIFY_START",
-  "percent": 40,
-  "total_files": 10
-}
-```
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `BUCKET_NAME` | GCS bucket for PDFs | `preavaluos-pdf` |
-| `FIRESTORE_DATABASE` | Firestore database name | `apolo-preavaluos-dev` |
-| `PORT` | HTTP port | `8080` |
-| `PYTHONUNBUFFERED` | Unbuffered output | `1` |
-
-## Security
-
-### Authentication
-- **Development**: Allow unauthenticated (for testing)
-- **Production**: Require authentication (OIDC or API key)
-
-### Service Account Permissions
-- `roles/storage.objectViewer` - Read PDFs from GCS
-- `roles/datastore.user` - Read/write Firestore
-- `roles/logging.logWriter` - Write logs
-
-### Data Protection
-- Encryption at rest (default GCP)
-- Encryption in transit (TLS 1.2+)
-- No sensitive data in logs
-- Non-root container user
-
-## Cost Optimization
-
-### Strategies Implemented
-1. **Scale to zero** - No cost when idle (min_instances=0 in dev)
-2. **Idempotency** - Prevents duplicate processing
-3. **Early validation** - Fails fast before expensive AI calls
-4. **Result caching** - Firestore cache reduces reprocessing
-5. **Efficient container** - Slim base image reduces cold start costs
-
-### Estimated Costs (Development)
-- Cloud Run: $2-5/month
-- Cloud Storage: $1-2/month
-- Firestore: $0.50-2/month
-- **Total: ~$5-10/month** (light usage)
-
-## Troubleshooting
-
-### Service Not Responding
-```bash
-# Check service status
-gcloud run services describe apolo-procesamiento-inteligente --region us-south1
-
-# View recent errors
-gcloud logging read "severity>=ERROR" --limit 20
-```
-
-### Permission Denied
-```bash
-# Verify service account permissions
-gcloud projects get-iam-policy PROJECT_ID \
-  --filter="bindings.members:serviceAccount:SA_EMAIL"
-```
-
-### Container Build Fails
-```bash
-# Check build logs
-gcloud builds list --limit=1
-gcloud builds log BUILD_ID
-```
+This Terraform configuration deploys a complete serverless document processing infrastructure including Cloud Run service, Cloud Storage, Firestore database, Document AI processors, and Eventarc triggers for automated processing.
 
 ## Project Structure
 
 ```
 apolo_procesamiento_inteligente_preavaluo/
-├── apolo_procesamiento_inteligente.py  # Main service code
-├── requirements.txt                     # Python dependencies
-├── Dockerfile                           # Container definition
-├── runtime.txt                          # Python version
-├── workflow.yaml                        # Cloud Workflows config (optional)
-├── README.md                            # This file
-│
-├── Documentation/                       # Complete documentation
-│   ├── ARCHITECTURE.md                  # System architecture
-│   ├── INFRASTRUCTURE.md                # Infrastructure details
-│   ├── DEPLOYMENT_CHECKLIST.md          # Deployment guide
-│   ├── GCP_COMMANDS.md                  # Command reference
-│   ├── FIRESTORE_SCHEMA.md              # Database schema
-│   ├── TESTING.md                       # Testing procedures
-│   └── QUICKSTART.md                    # Quick start guide
-│
-├── scripts/                             # Deployment automation
-│   ├── powershell/                      # Windows scripts
-│   │   ├── deploy-complete.ps1          # Full deployment
-│   │   ├── build-docker.ps1             # Build container
-│   │   ├── deploy-cloudrun.ps1          # Deploy service
-│   │   └── test-cloudrun.ps1            # Test suite
-│   └── bash/                            # Linux/Mac scripts
-│       ├── build-docker.sh
-│       ├── deploy-cloudrun.sh
-│       └── test-cloudrun.sh
-│
-└── infrastructure/
-    └── terraform/                       # Infrastructure as Code
-        ├── main.tf                      # Core resources
-        ├── variables.tf                 # Variable definitions
-        ├── outputs.tf                   # Output values
-        ├── providers.tf                 # Provider config
-        ├── README.md                    # Terraform guide
-        └── env/                         # Environment configs
-            ├── dev.tfvars
-            ├── qa.tfvars
-            └── prod.tfvars
+├── scripts/
+│   ├── setup.sh              # Configuración inicial GCP
+│   ├── deploy.sh             # Despliegue completo automatizado
+│   ├── cleanup.sh            # Limpieza de archivos obsoletos
+│   └── README.md             # Guía de scripts (actualizada)
+├── infrastructure/
+│   └── terraform/
+│       ├── main.tf           # Core infrastructure resources
+│       ├── variables.tf      # Variable definitions
+│       ├── outputs.tf        # Output values
+│       ├── providers.tf      # GCP provider configuration
+│       └── env/
+│           ├── dev.tfvars    # Development environment
+│           ├── qa.tfvars     # QA environment
+│           └── prod.tfvars   # Production environment
+├── apolo_procesamiento_inteligente.py  # Aplicación principal
+├── Dockerfile                # Container configuration
+└── requirements.txt          # Python dependencies
 ```
 
-## Development
+## Resources Managed
 
-### Local Development
+### Core Resources
+- **Cloud Run Service** - Serverless containerized microservice
+- **Artifact Registry** - Docker image repository
+- **Eventarc Trigger** - GCS event-driven activation (object.finalize)
+- **Document AI Processors** - Classifier and Form Extractor
+- **Cloud Storage Bucket** - PDF document storage with versioning
+- **Firestore Database** - NoSQL database for results and idempotency
+- **Pub/Sub Topic** - Dead Letter Queue for failed documents
+- **Service Account** - Dedicated SA for Cloud Run
+- **IAM Bindings** - Least-privilege permission assignments
+
+### Optional Resources
+- **Log Sinks** - Centralized log aggregation
+- **Monitoring Alerts** - Production alerting (prod only)
+- **VPC Connector** - Private networking (if needed)
+
+## Prerequisites
+
+### 1. Install Required Tools
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Terraform (v1.5+)
+terraform --version
 
-# Run locally
-functions-framework --target=document_processor --debug
+# Google Cloud SDK
+gcloud --version
+
+# Verify authentication
+gcloud auth list
 ```
 
-### Docker Build
+### 2. Authenticate with GCP
 ```bash
-# Build image
-docker build -t apolo-procesamiento-inteligente .
+# Login with user account
+gcloud auth application-default login
 
-# Run locally
-docker run -p 8080:8080 \
-  -e BUCKET_NAME=preavaluos-pdf \
-  -e FIRESTORE_DATABASE=apolo-preavaluos-dev \
-  apolo-procesamiento-inteligente
+# Set default project
+gcloud config set project YOUR_PROJECT_ID
+
+# Verify project
+gcloud config get-value project
 ```
 
-## Roadmap
-
-### Current (v1.0) - Simulated Processing
-- ✅ PDF validation
-- ✅ Simulated classification
-- ✅ Simulated extraction
-- ✅ Firestore persistence
-- ✅ Idempotency
-- ✅ Three processing modes
-
-### Next (v1.1) - Document AI Integration
-- [ ] Real Document AI Classifier
-- [ ] Real Document AI Extractor
-- [ ] Custom processor training
-- [ ] Confidence thresholds
-- [ ] Human review queue
-
-### Future (v2.0) - Advanced Features
-- [ ] Multi-region deployment
-- [ ] Advanced analytics
-- [ ] BigQuery integration
-- [ ] Real-time notifications
-- [ ] API Gateway
-
-## Support
-
-- **Documentation**: See `Documentation/` folder
-- **Issues**: GitHub Issues
-- **Questions**: Contact DevOps team
-
-## License
-
-MIT License - See [LICENSE](LICENSE) file
-
----
-
-**Maintained by**: Apolo Solutions DevOps Team  
-**Version**: 1.0.0  
-**Last Updated**: December 2025
-  "document_count": 2,
-  "results": [
-    {
-      "file_name": "balance_general.pdf",
-      "gcs_uri": "gs://preavaluos-pdf/PRE-2025-001/balance_general.pdf",
-      "classification": {
-        "document_type": "BalanceGeneral",
-        "confidence": 0.95
-      },
-      "extraction": {
-        "fields": {"Ingresos": 25000.50, "Egresos": 12000.75, "Fecha": "2025-12-01"},
-        "metadata": {
-          "page_refs": [{"page": 1, "bbox": {"x1": 100, "y1": 200, "x2": 300, "y2": 220}}],
-          "processor_version": "sim-v1",
-          "decision_path": "SIMULATED"
-        }
-      },
-      "processed_at": "2025-12-04T14:30:00.123456",
-      "from_cache": false
-    }
-  ]
-}
+### 3. Enable Required APIs
+```bash
+gcloud services enable \
+  cloudresourcemanager.googleapis.com \
+  serviceusage.googleapis.com \
+  iam.googleapis.com \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  storage.googleapis.com \
+  firestore.googleapis.com
 ```
 
-**Salida (Response JSON) - Error**
-```json
+### 4. Create Terraform State Bucket
+```bash
+# Create bucket for remote state
+gsutil mb -p YOUR_PROJECT_ID -l us-south1 gs://apolo-tf-state-bucket
+
+# Enable versioning
+gsutil versioning set on gs://apolo-tf-state-bucket
+
+# Set lifecycle policy
+cat > lifecycle.json <<EOF
 {
-  "status": "error",
-  "run_id": "wf-abc123",
-  "preavaluo_id": "PRE-2025-001",
-  "bucket": "preavaluos-pdf",
-  "folder_prefix": "PRE-2025-001/",
-  "document_count": 0,
-  "results": [],
-  "error": {
-    "stage": "VALIDATION",
-    "code": "NO_VALID_PDFS",
-    "message": "No valid PDF files found.",
-    "details": {"invalid_files": [{"file_name": "doc.txt", "error": {...}}]},
-    "ts_utc": "2025-12-04T14:30:00Z"
+  "lifecycle": {
+    "rule": [{
+      "action": {"type": "Delete"},
+      "condition": {"numNewerVersions": 5}
+    }]
+  }
+}
+EOF
+gsutil lifecycle set lifecycle.json gs://apolo-tf-state-bucket
+```
+
+
+## Quick Start
+
+### 1. Initialize Terraform
+```bash
+cd infrastructure/terraform
+terraform init
+```
+
+### 2. Build and Push Docker Image
+```bash
+# Usar Cloud Build desde Google Cloud Shell
+cd scripts
+./deploy.sh dev TU_PROJECT_ID
+
+# El script automáticamente construye y sube la imagen
+```
+
+### 3. Review Configuration
+Edit the appropriate environment file:
+```bash
+# For development
+vi env/dev.tfvars
+```
+
+Required variables:
+- `project_id` - Your GCP project ID
+- `region` - Deployment region (default: us-south1)
+- `environment` - Environment name (dev/qa/prod)
+- `cloudrun_image` - Docker image URL from Artifact Registry
+
+### 4. Plan Deployment
+```bash
+# Development environment
+terraform plan -var-file="env/dev.tfvars"
+
+# Production environment
+terraform plan -var-file="env/prod.tfvars"
+```
+
+### 5. Apply Configuration
+```bash
+# Development
+terraform apply -var-file="env/dev.tfvars"
+
+# Production (requires approval)
+terraform apply -var-file="env/prod.tfvars"
+```
+
+### 6. Verify Deployment
+```bash
+# View outputs
+terraform output
+
+# Test by uploading is_ready file to GCS
+# 1. Upload test PDFs to: gs://bucket-name/TEST-001/*.pdf
+# 2. Upload trigger file: gs://bucket-name/TEST-001/is_ready
+# 3. Check Firestore for results in: folios/TEST-001/documentos/
+
+# View logs
+gcloud logging read "resource.type=cloud_run_revision" --limit=50
+```
+
+## Environment-Specific Deployments
+
+### Development Environment
+```bash
+# Plan changes
+terraform plan -var-file="env/dev.tfvars"
+
+# Apply
+terraform apply -var-file="env/dev.tfvars" -auto-approve
+
+# View outputs
+terraform output
+```
+
+**Dev Configuration:**
+- CPU: 1
+- Memory: 512Mi
+- Min instances: 0
+- Max instances: 3
+- Timeout: 300s (5 min)
+- Ingress: Internal only
+
+### QA Environment
+```bash
+terraform plan -var-file="env/qa.tfvars"
+terraform apply -var-file="env/qa.tfvars"
+```
+
+**QA Configuration:**
+- CPU: 2
+- Memory: 1Gi
+- Min instances: 0
+- Max instances: 5
+- Timeout: 450s (7.5 min)
+- Ingress: Internal only
+
+### Production Environment
+```bash
+terraform plan -var-file="env/prod.tfvars"
+terraform apply -var-file="env/prod.tfvars"
+```
+
+**Production Configuration:**
+- CPU: 2
+- Memory: 2Gi
+- Min instances: 1 (always warm)
+- Max instances: 10
+- Timeout: 540s (9 min)
+- Ingress: Internal only
+- Full monitoring and alerting
+
+## Important Variables
+
+### Required Variables
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `project_id` | GCP Project ID | `apolo-prod-12345` |
+| `region` | GCP region | `us-south1` |
+| `environment` | Environment name | `dev`, `qa`, `prod` |
+
+### Optional Variables
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `service_name` | Cloud Run service name | `apolo-procesamiento-inteligente` |
+| `bucket_name` | GCS bucket name | `{project_id}-preavaluos-pdf` |
+| `firestore_database` | Firestore database name | `apolo-preavaluos-{env}` |
+| `container_image` | Container image URL | Latest from GCR |
+| `memory` | Service memory allocation | `1Gi` |
+| `timeout` | Request timeout | `300s` |
+| `max_instances` | Max service instances | `100` |
+| `min_instances` | Min service instances | `0` |
+
+## Outputs
+
+After successful deployment, Terraform provides:
+
+```bash
+terraform output
+```
+
+| Output | Description |
+|--------|-------------|
+| `cloudrun_service_url` | Cloud Run service endpoint |
+| `cloudrun_service_name` | Name of deployed service |
+| `pdf_bucket_name` | GCS bucket for PDFs |
+| `firestore_database_name` | Firestore database name |
+| `artifact_registry_repo` | Docker image repository |
+| `eventarc_trigger_name` | Eventarc trigger for GCS events |
+| `classifier_processor_id` | Document AI classifier ID |
+| `extractor_processor_id` | Document AI extractor ID |
+
+## State Management
+
+### Remote State Configuration
+Edit `providers.tf` to configure remote state:
+
+```hcl
+terraform {
+  backend "gcs" {
+    bucket = "apolo-tf-state-bucket"
+    prefix = "terraform/state"
   }
 }
 ```
 
-## 🔄 Idempotencia y Firestore (Document AI)
+### State Commands
+```bash
+# List resources in state
+terraform state list
 
-El microservicio implementa una **estructura jerárquica en Firestore** para organizar resultados de Document AI por corrimiento (run):
+# Show specific resource
+terraform state show google_cloud_run_service.processor
 
-### Estructura de Colecciones
-```
-firestore (database: apolo-preavaluos-dev)
-└── runs/
-    ├── {runId}/                    # UUID del corrimiento
-    │   ├── status: processing | completed | partial_failure
-    │   ├── documentCount, processedCount, failedCount
-    │   └── documents/              # Subcolección
-    │       └── {docId}/            # Hash SHA-256(folioId:fileId)
-    │           ├── classification: {...}
-    │           └── extraction: {...}
+# Move resource in state
+terraform state mv SOURCE DESTINATION
+
+# Remove resource from state (doesn't delete)
+terraform state rm google_cloud_run_service.processor
 ```
 
-### Características Clave
-- **Document ID**: Hash SHA-256 de `folioId:fileId` (16 caracteres)
-- **Lease Mechanism**: Previene procesamiento concurrente (timeout: 10 minutos)
-- **Cache Hit**: Si el documento ya fue procesado, retorna desde Firestore con `from_cache: true`
-- **Status Tracking**: `processing` → `completed` | `failed`
-- **Contadores Automáticos**: Se actualizan con `firestore.Increment()` (atómico)
+## Updating Infrastructure
 
-### Clasificador Document AI
-El sistema soporta **3 tipos de documentos financieros**:
-- `ESTADO_RESULTADOS` - Estado de Resultados / Profit & Loss
-- `ESTADO_SITUACION_FINANCIERA` - Balance General / Statement of Financial Position
-- `ESTADO_FLUJOS_EFECTIVO` - Estado de Flujos de Efectivo / Cash Flow Statement
+### Update Service Configuration
+```bash
+# Modify variables in env file
+vi variables+dev.tfvars
 
-### Extractores Estructurados
-Cada tipo de documento tiene campos específicos extraídos:
-- `LINE_ITEM_NAME`, `LINE_ITEM_VALUE`, `COLUMN_YEAR`
-- `SECTION_HEADER`, `TOTAL_LABEL`, `CURRENCY`, `UNITS_SCALE`
-- `REPORTING_PERIOD`, `ORG_NAME`, `STATEMENT_TITLE`
-- Metadata: `processor_version`, `extraction_schema_version`, `page_count`
+# Plan changes
+terraform plan -var-file="variables+dev.tfvars"
 
-**Ver esquema completo**: [`docs/FIRESTORE_SCHEMA.md`](docs/FIRESTORE_SCHEMA.md)
+# Apply changes
+terraform apply -var-file="variables+dev.tfvars"
+```
 
-**Ejemplo de documento en Firestore:**
-```json
-{
-  "docId": "a1b2c3d4e5f6g7h8",
-  "runId": "wf-abc123",
-  "folioId": "PRE-2025-001",
-  "fileId": "balance_general.pdf",
-  "gcsUri": "gs://preavaluos-pdf/PRE-2025-001/balance_general.pdf",
-  "status": "completed",
-  
-  "classification": {
-    "documentType": "ESTADO_SITUACION_FINANCIERA",
-    "confidence": 0.985,
-    "classifierVersion": "document-ai-classifier-v1"
-  },
-  
-  "extraction": {
-    "fields": {
-      "ORG_NAME": "Apolo Solutions S.A. de C.V.",
-      "REPORTING_PERIOD": "2024-12-31",
-      "STATEMENT_TITLE": "Estado de Situación Financiera",
-      "line_items": [
-        {
-          "LINE_ITEM_NAME": "Total Activo",
-          "LINE_ITEM_VALUE": 7500000.00,
-          "COLUMN_YEAR": "2024",
-          "TOTAL_LABEL": "TOTAL"
-        }
-      ]
-    },
-    "metadata": {
-      "processor_version": "document-ai-v1",
-      "extraction_schema_version": "v1.0"
-    }
-  },
-  
-  "processedAt": "2025-12-04T14:30:05Z"
+### Update Container Image
+```bash
+# Build new image
+gcloud builds submit --tag gcr.io/PROJECT_ID/apolo-procesamiento-inteligente:v2.0
+
+# Update variable or main.tf with new image
+# Apply changes
+terraform apply -var-file="variables+dev.tfvars"
+```
+
+### Rollback Changes
+```bash
+# Revert to previous state
+terraform apply -var-file="variables+dev.tfvars" -auto-approve
+
+# Or use Git to revert changes
+git revert HEAD
+terraform apply -var-file="variables+dev.tfvars"
+```
+
+## Destroying Resources
+
+### Destroy Specific Environment
+```bash
+# Review what will be destroyed
+terraform plan -destroy -var-file="variables+dev.tfvars"
+
+# Destroy
+terraform destroy -var-file="variables+dev.tfvars"
+```
+
+### Destroy with Target
+```bash
+# Destroy only Cloud Run service
+terraform destroy -target=google_cloud_run_service.processor \
+  -var-file="variables+dev.tfvars"
+```
+
+### Safety Considerations
+⚠️ **Before destroying:**
+- Backup Firestore data
+- Export GCS bucket contents
+- Notify stakeholders
+- Disable traffic routing
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Authentication Errors
+```bash
+# Re-authenticate
+gcloud auth application-default login
+
+# Verify project
+gcloud config get-value project
+```
+
+#### 2. API Not Enabled
+```bash
+# Enable required API
+gcloud services enable SERVICE_NAME.googleapis.com
+```
+
+#### 3. Permission Denied
+```bash
+# Check your permissions
+gcloud projects get-iam-policy PROJECT_ID \
+  --filter="bindings.members:user:YOUR_EMAIL"
+```
+
+#### 4. State Lock Errors
+```bash
+# Force unlock (use carefully)
+terraform force-unlock LOCK_ID
+```
+
+#### 5. Resource Already Exists
+```bash
+# Import existing resource
+terraform import google_cloud_run_service.processor \
+  projects/PROJECT_ID/locations/REGION/services/SERVICE_NAME
+```
+
+### Debugging
+```bash
+# Enable debug logging
+export TF_LOG=DEBUG
+terraform apply -var-file="variables+dev.tfvars"
+
+# Disable debug logging
+unset TF_LOG
+```
+
+## Best Practices
+
+### 1. Use Workspaces for Environments
+```bash
+# Create workspace
+terraform workspace new dev
+
+# List workspaces
+terraform workspace list
+
+# Switch workspace
+terraform workspace select dev
+```
+
+### 2. Format Code
+```bash
+terraform fmt -recursive
+```
+
+### 3. Validate Configuration
+```bash
+terraform validate
+```
+
+### 4. Generate Documentation
+```bash
+# Using terraform-docs
+terraform-docs markdown table . > TERRAFORM_DOCS.md
+```
+
+### 5. Use Variables Files
+Never hardcode values - use `.tfvars` files for all environments.
+
+### 6. Enable State Locking
+Always use remote backend with locking (GCS supports this automatically).
+
+### 7. Tag Resources
+Add labels to all resources for cost tracking and organization:
+```hcl
+labels = {
+  environment = var.environment
+  managed_by  = "terraform"
+  project     = "apolo-document-processing"
 }
 ```
-          "page_refs": [{"page": 1, "bbox": {"x1": 100, "y1": 200, "x2": 300, "y2": 220}}],
-          "processor_version": "sim-v1",
-          "decision_path": "SIMULATED"
-        }
-      },
-      "processed_at": "2025-12-03T14:30:00.123456"
-    }
-  ]
-}
-```
 
-**Tipos de Documentos Soportados**
-- `EstadoDeResultados` - Documento financiero de ingresos y egresos
-- `BalanceGeneral` - Documento de activos y pasivos
-- `RegistrosPatronales` - Documento de registros de empleadores
+## CI/CD Integration
 
-## 📁 Estructura del Repositorio
-
-```
-apolo_procesamiento_inteligente_preavaluo/
-├── apolo_procesamiento_inteligente.py  # Función principal (entry point)
-├── requirements.txt                     # Dependencias Python
-├── workflow.yaml                        # Definición de Cloud Workflow
-├── Dockerfile                           # Configuración Docker para Cloud Run
-├── docker-compose.yml                   # Desarrollo local con Docker
-├── .dockerignore                        # Archivos excluidos de imagen Docker
-├── .env.example                         # Plantilla de variables de entorno
-├── pyrightconfig.json                   # Configuración de type checking
-├── runtime.txt                          # Especificación Python 3.11
-├── .python-version                      # Versión Python para pyenv
-├── .gitignore                           # Archivos ignorados por Git
-├── README.md                            # Este archivo
-├── LICENSE                              # Licencia MIT
-│
-├── docs/                                # 📚 Documentación completa
-│   ├── README.md                        # Índice de documentación
-│   ├── QUICKSTART.md                    # Guía de inicio rápido
-│   ├── DEPLOY_GUIDE.md                  # Guía detallada de despliegue
-│   ├── TESTING.md                       # Guía de pruebas
-│   └── PROJECT_STATUS.md                # Estado actual del proyecto
-│
-├── scripts/                             # 🛠️ Scripts de automatización
-│   ├── README.md                        # Índice de scripts
-│   ├── powershell/                      # Scripts para Windows
-│   │   ├── README.md                    # Documentación PowerShell
-│   │   ├── build-docker.ps1             # Construir imagen Docker local
-│   │   ├── deploy-cloudrun.ps1          # Desplegar a Cloud Run
-│   │   ├── deploy-complete.ps1          # Setup completo desde cero
-│   │   └── test-cloudrun.ps1            # Suite de pruebas
-│   └── bash/                            # Scripts para Linux/Mac
-│       ├── README.md                    # Documentación Bash
-│       ├── build-docker.sh              # Construir imagen Docker local
-│       ├── deploy-cloudrun.sh           # Desplegar a Cloud Run
-│       └── test-cloudrun.sh             # Suite de pruebas
-│
-└── infrastructure/                      # 🏗️ Infraestructura como código
-    └── terraform/                       # Configuración Terraform (opcional)
-        ├── README.md                    # Guía de Terraform
-        ├── main.tf                      # Recursos principales
-        ├── variables.tf                 # Variables de entrada
-        ├── outputs.tf                   # Valores de salida
-        ├── providers.tf                 # Configuración de providers
-        ├── deploy.ps1                   # Script de despliegue PowerShell
-        ├── deploy.sh                    # Script de despliegue Bash
-        └── env/                         # Archivos de variables por entorno
-            ├── dev.tfvars
-            ├── qa.tfvars
-            ├── prod.tfvars
-            └── example.tfvars
-```
-
-## 🎯 Características Implementadas
-
-### ✅ Validación de PDF
-- Verifica magic bytes (%PDF-) antes de procesar
-- Rechaza archivos corruptos o no-PDF
-- Reporta archivos inválidos en respuesta de error
-
-### ✅ Idempotencia Robusta
-- Hash determin\u00edstico: `SHA256(folioId:fileId)[:16]`
-- Lease mechanism con timeout de 10 minutos
-## 🛠️ Guías de Inicio
-
-### 🚀 Inicio Rápido
-Para comenzar rápidamente:
-```powershell
-# 1. Lee la guía de inicio
-Get-Content docs\QUICKSTART.md
-
-# 2. Despliega con un comando
-.\scripts\powershell\deploy-complete.ps1
-```
-
-Ver **[docs/QUICKSTART.md](docs/QUICKSTART.md)** para guía paso a paso completa.
-
-### 📖 Guías Completas
-
-| Guía | Propósito | Cuándo Usarla |
-|------|-----------|---------------|
-| **[QUICKSTART.md](docs/QUICKSTART.md)** | Inicio rápido para principiantes | Primera vez, instalación desde cero |
-| **[DEPLOY_GUIDE.md](docs/DEPLOY_GUIDE.md)** | Despliegue técnico detallado | Necesitas entender cada paso |
-| **[TESTING.md](docs/TESTING.md)** | Cómo probar el servicio | Validar que funciona correctamente |
-| **[PROJECT_STATUS.md](docs/PROJECT_STATUS.md)** | Estado y roadmap | Ver qué está listo y qué falta |
-
-### 🛠️ Scripts Disponibles
-
-Todos los scripts están documentados en **[scripts/README.md](scripts/README.md)**
-
-**Windows (PowerShell):**
-```powershell
-# Construir imagen Docker local
-.\scripts\powershell\build-docker.ps1
-
-# Desplegar a Cloud Run
-.\scripts\powershell\deploy-cloudrun.ps1 -Environment dev -ProjectId "tu-project-id"
-
-# Setup completo desde cero
-.\scripts\powershell\deploy-complete.ps1
-
-# Probar servicio
-.\scripts\powershell\test-cloudrun.ps1 -ServiceUrl "https://tu-servicio.run.app" -Mode batch
-```
-
-**Linux/Mac (Bash):**
-```bash
-# Construir imagen Docker local
-./scripts/bash/build-docker.sh
-
-# Desplegar a Cloud Run
-export GCP_PROJECT_ID="tu-project-id"
-./scripts/bash/deploy-cloudrun.sh dev
-
-# Probar servicio
-./scripts/bash/test-cloudrun.sh "https://tu-servicio.run.app" batch
-```
-
-Ver documentación completa en:
-- **[scripts/powershell/README.md](scripts/powershell/README.md)** - Scripts Windows
-- **[scripts/bash/README.md](scripts/bash/README.md)** - Scripts Linux/Mac
-
-## 🧪 Desarrollo Local
-
-### Opción 1: Ejecutar con Docker (Recomendado)
-
-```powershell
-# Windows
-.\scripts\powershell\build-docker.ps1
-docker run -p 8080:8080 --rm apolo-procesamiento-inteligente:local-latest
-
-# Probar (en otra terminal)
-.\scripts\powershell\test-cloudrun.ps1 -ServiceUrl "http://localhost:8080"
-```
-
-```bash
-# Linux/Mac
-./scripts/bash/build-docker.sh
-docker run -p 8080:8080 --rm apolo-procesamiento-inteligente:local-latest
-
-# Probar (en otra terminal)
-./scripts/bash/test-cloudrun.sh "http://localhost:8080" individual
-```
-
-### Opción 2: Ejecutar con Python directamente
-
-```bash
-# Crear entorno virtual
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Instalar dependencias
-pip install -r requirements.txt
-
-# Configurar credenciales
-export GOOGLE_APPLICATION_CREDENTIALS="path/to/credentials.json"
-export BUCKET_NAME="preavaluos-pdf"
-
-# Ejecutar con functions-framework
-functions-framework --target=document_processor --debug --port=8080
-```
-
-## 🔧 Configuración y Despliegue a GCP
-
-### Requisitos Previos
-- Google Cloud SDK (gcloud CLI)
-- Docker Desktop
-- Proyecto GCP creado
-- Permisos de Owner/Editor en el proyecto
-
-### Despliegue Rápido
-
-**Primera vez (setup completo):**
-```powershell
-# Windows
-.\scripts\powershell\deploy-complete.ps1
-
-# Linux/Mac
-export GCP_PROJECT_ID="tu-project-id"
-./scripts/bash/deploy-cloudrun.sh dev
-```
-
-**Redespliegue (después de cambios):**
-```powershell
-# Windows
-.\scripts\powershell\deploy-cloudrun.ps1 -Environment prod -ProjectId "tu-project-id"
-
-# Linux/Mac
-export GCP_PROJECT_ID="tu-project-id"
-./scripts/bash/deploy-cloudrun.sh prod
-```
-
-### Validación Post-Despliegue
-
-```powershell
-# Windows
-.\scripts\powershell\test-cloudrun.ps1 -ServiceUrl "https://tu-servicio.run.app" -Mode batch
-
-# Linux/Mac
-./scripts/bash/test-cloudrun.sh "https://tu-servicio.run.app" batch
-```
-
-> 📖 **Guía completa**: Ver [docs/DEPLOY_GUIDE.md](docs/DEPLOY_GUIDE.md) para instrucciones detalladas paso a paso.
-
-## 📋 Variables de Entorno
-
-| Variable | Descripción | Default | Requerida |
-|----------|-------------|---------|-----------|
-| `BUCKET_NAME` | Nombre del bucket GCS | `preavaluos-pdf` | Sí |
-| `GCP_PROJECT_ID` | ID del proyecto GCP | - | Sí (scripts) |
-| `GCP_REGION` | Región de despliegue | `us-south1` | No |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Ruta a credenciales JSON | - | Sí (local) |
-
-## 🐳 Docker y Cloud Run
-
-### Construcción Local
-
-**Bash/Linux:**
-```bash
-# Construir imagen localmente
-./build-docker.sh
-
-# O manualmente:
-docker build -t apolo-procesamiento-inteligente:local-latest .
-```
-
-**PowerShell/Windows:**
-```powershell
-# Construir imagen localmente
-.\build-docker.ps1
-
-# O manualmente:
-docker build -t apolo-procesamiento-inteligente:local-latest .
-```
-
-### Ejecución Local con Docker
-
-```bash
-# Ejecutar contenedor localmente
-docker run -p 8080:8080 --rm \
-  -e BUCKET_NAME=preavaluos-pdf \
-  -e GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json \
-  -v /path/to/credentials.json:/app/credentials.json:ro \
-  apolo-procesamiento-inteligente:local-latest
-```
-
-**Probar localmente:**
-```bash
-curl -X POST http://localhost:8080 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "folioId": "PRE-2025-001",
-    "fileId": "balance_general.pdf",
-    "gcs_pdf_uri": "gs://preavaluos-pdf/PRE-2025-001/balance_general.pdf",
-    "workflow_execution_id": "test-123"
-  }'
-```
-
-### Despliegue a Cloud Run
-
-**Prerrequisitos:**
-1. Instalar [gcloud CLI](https://cloud.google.com/sdk/docs/install)
-2. Instalar [Docker Desktop](https://www.docker.com/products/docker-desktop)
-3. Autenticarse: `gcloud auth login`
-4. Configurar proyecto: `gcloud config set project YOUR_PROJECT_ID`
-5. Crear Service Account con permisos:
-   - Storage Object Viewer (para leer PDFs)
-   - Firestore User (para persistencia)
-
-**Despliegue Automático - Bash/Linux:**
-```bash
-# Configurar variables de entorno
-export GCP_PROJECT_ID="apolo-solutions-project"
-export GCP_REGION="us-south1"
-export BUCKET_NAME="preavaluos-pdf"
-
-# Desplegar a Cloud Run (dev, qa, o prod)
-chmod +x deploy-cloudrun.sh
-./deploy-cloudrun.sh dev
-```
-
-**Despliegue Automático - PowerShell/Windows:**
-```powershell
-# Configurar variables de entorno
-$env:GCP_PROJECT_ID = "apolo-solutions-project"
-
-# Desplegar a Cloud Run (dev, qa, o prod)
-.\deploy-cloudrun.ps1 -Environment dev -ProjectId "apolo-solutions-project" -Region "us-south1" -BucketName "preavaluos-pdf"
-```
-
-**Despliegue Manual:**
-```bash
-# 1. Configurar Docker para GCR
-gcloud auth configure-docker gcr.io
-
-# 2. Construir y subir imagen
-export PROJECT_ID="apolo-solutions-project"
-export IMAGE_NAME="gcr.io/${PROJECT_ID}/apolo-procesamiento-inteligente"
-
-docker build --platform linux/amd64 -t ${IMAGE_NAME}:latest .
-docker push ${IMAGE_NAME}:latest
-
-# 3. Desplegar a Cloud Run
-gcloud run deploy apolo-procesamiento-inteligente \
-  --image ${IMAGE_NAME}:latest \
-  --platform managed \
-  --region us-south1 \
-  --allow-unauthenticated \
-  --set-env-vars BUCKET_NAME=preavaluos-pdf \
-  --memory 512Mi \
-  --cpu 1 \
-  --timeout 300 \
-  --concurrency 80 \
-  --max-instances 10 \
-  --min-instances 0 \
-  --service-account apolo-procesamiento-sa@${PROJECT_ID}.iam.gserviceaccount.com
-```
-
-### Características de Cloud Run
-
-| Característica | Configuración |
-|---------------|---------------|
-| **Memoria** | 512 MiB |
-| **CPU** | 1 vCPU |
-| **Timeout** | 300s (5 minutos) |
-| **Concurrencia** | 80 requests por instancia |
-| **Escalado** | 0-10 instancias (auto) |
-| **Puerto** | 8080 |
-| **Plataforma** | linux/amd64 |
-
-## 🌐 Despliegue en GCP (Cloud Functions)
-
-**Nota**: Los archivos `terraform/` están disponibles para configuración por ambiente (dev, qa, prod).
-
-```bash
-# Desplegar usando Terraform
-cd infrastructure/terraform
-terraform init
-terraform apply -var-file="env/dev.tfvars"
-```
-
-**Variables necesarias en `dev.tfvars`**:
-- `project_id` - ID del proyecto GCP
-- `service_name` - Nombre de la Cloud Function
-- `bucket_name` - Nombre del bucket GCS a procesar
-- `region` - Región de despliegue (us-south1)
-
-## 🔄 Orquestación con Cloud Workflows
-
-La función es invocada por `workflow.yaml`, que orquesta el flujo completo:
-
+### GitHub Actions Example
 ```yaml
-callProcessor:
-  call: http.post
-  args:
-    url: ${processor_url}
-    auth:
-      type: OIDC
-      audience: ${processor_audience}
-    body:
-      folioId: ${folio_id}
-      fileId: ${file_id}
-      gcs_pdf_uri: ${gcs_pdf_uri}
-      workflow_execution_id: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+name: Terraform Deploy
+on:
+  push:
+    branches: [main]
+    paths: ['infrastructure/terraform/**']
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: hashicorp/setup-terraform@v1
+      
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infrastructure/terraform
+      
+      - name: Terraform Plan
+        run: terraform plan -var-file="variables.tfvars"
+        working-directory: infrastructure/terraform
+      
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        run: terraform apply -var-file="variables.tfvars" -auto-approve
+        working-directory: infrastructure/terraform
 ```
 
-**Características del Workflow**:
-- Autenticación OIDC (sin credenciales estáticas)
-- Reintentos automáticos con backoff exponencial
-- Pasa parámetros desde el contexto del flujo
-- Tracking con workflow_execution_id para correlación
+## Security Considerations
 
-## 📝 Estructura de Archivos
+1. **Sensitive Variables** - Use environment variables or secret managers
+2. **State File Security** - Restrict access to state bucket
+3. **Service Account Permissions** - Follow least privilege principle
+4. **Enable Encryption** - Use customer-managed encryption keys (optional)
+5. **Audit Logging** - Enable Cloud Audit Logs for all resources
 
-```
-apolo_procesamiento_inteligente_preavaluo/
-├── apolo_procesamiento_inteligente.py  # Cloud Function principal
-├── requirements.txt                     # Dependencias Python
-├── runtime.txt                          # Versión de Python (3.11)
-├── .python-version                      # Versión local Python
-├── workflow.yaml                        # Orquestación Cloud Workflows
-├── LICENSE                              # MIT License
-├── README.md                            # Documentación
-│
-├── Docker y Deployment
-├── Dockerfile                           # Imagen Docker para Cloud Run
-├── .dockerignore                        # Archivos excluidos de imagen
-├── build-docker.sh                      # Script build local (Bash)
-├── build-docker.ps1                     # Script build local (PowerShell)
-├── deploy-cloudrun.sh                   # Despliegue completo (Bash)
-├── deploy-cloudrun.ps1                  # Despliegue completo (PowerShell)
-│
-├── Configuración
-├── pyrightconfig.json                   # Configuración Pylance/Pyright
-│
-└── Infrastructure as Code
-    └── infrastructure/
-        └── terraform/
-            ├── main.tf                  # Recursos GCP
-            ├── variables.tf             # Variables Terraform
-            ├── outputs.tf               # Outputs Terraform
-            ├── providers.tf             # Providers GCP
-            ├── deploy.sh                # Script despliegue Terraform
-            ├── deploy.ps1               # Script despliegue Terraform (PS)
-            └── env/
-                ├── dev.tfvars           # Variables desarrollo
-                ├── qa.tfvars            # Variables QA
-                ├── prod.tfvars          # Variables producción
-                └── example.tfvars       # Ejemplo de configuración
+## Cost Optimization
+
+### Strategies Implemented
+- Scale to zero when idle (min_instances=0 in dev/qa)
+- Efficient container images (slim base)
+- Lifecycle policies on GCS
+- Appropriate instance sizing per environment
+
+### Cost Estimation
+```bash
+# Use Google Cloud Pricing Calculator
+# Typical monthly costs (dev environment):
+# - Cloud Run: $5-20 (minimal traffic)
+# - Cloud Storage: $1-5 (few GBs)
+# - Firestore: $1-10 (reads/writes)
+# Total: ~$10-40/month for dev
 ```
 
-### Componentes Principales
+## Support
 
-**Core Application:**
-- `apolo_procesamiento_inteligente.py` - Entry point HTTP, procesamiento de PDFs
-  - `document_processor()` - Handler principal
-  - `simulate_classification()` - Clasificación de documentos
-  - `simulate_extraction()` - Extracción de campos
-  - `_is_valid_pdf()` - Validación de PDFs por magic bytes
-  - `_check_and_acquire_lease()` - Idempotencia con Firestore
-  - `_persist_result()` - Persistencia de resultados
+For issues or questions:
+1. Check [Architecture Documentation](../../Documentation/ARCHITECTURE.md)
+2. Review [GCP Commands Guide](../../Documentation/GCP_COMMANDS.md)
+3. See [Deployment Checklist](../../Documentation/DEPLOYMENT_CHECKLIST.md)
+4. Contact DevOps team
 
-**Docker & Deployment:**
-- Scripts de construcción local (`build-docker.*`)
-- Scripts de despliegue completo a Cloud Run (`deploy-cloudrun.*`)
-- Configuración de imagen optimizada para producción
+## Version History
 
-## 🔐 Seguridad
-
-- **Autenticación OIDC**: Cloud Workflows autentica a Cloud Function sin exponer credenciales
-- **IAM**: Service accounts granulares para acceso a GCS y otros recursos
-- **No hay credenciales estáticas**: Todas las credenciales se manejan a través de GCP IAM
-
-## ⚠️ Comportamiento Actual (Simulado)
-
-**Nota**: Las funciones de clasificación y extracción actualmente son simuladas para demostración.
-
-- `simulate_classification()` - Retorna un tipo de documento aleatorio con confianza entre 80-99%
-- `simulate_extraction()` - Retorna campos genéricos según el tipo de documento
-- No realiza procesamiento real de PDF o acceso a Document AI (pendiente implementación)
-
-## 🤝 Contribución
-
-1. Fork el repositorio
-2. Crea una rama: `git checkout -b feature/nueva-feature`
-3. Commit: `git commit -am 'Añade nueva feature'`
-4. Push: `git push origin feature/nueva-feature`
-5. Abre un Pull Request
-
-## 📄 Licencia
-
-Este proyecto está bajo licencia MIT. Ver `LICENSE` para detalles.
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0.0 | 2025-12-04 | Initial Terraform configuration |
 
 ---
 
-**Apolo Solutions** © 2025. Todos los derechos reservados.
+**Maintained by**: Apolo Solutions DevOps Team  
+**Last Updated**: December 2025
+terraform plan -var-file="variables+dev.tfvars" -out=dev.tfplan
+
+# Apply
+terraform apply "dev.tfplan"
+
+# Verify
+terraform show
+```
+
+### QA
+```bash
+terraform plan -var-file="variables+qa.tfvars" -out=qa.tfplan
+terraform apply "qa.tfplan"
+```
+
+### Production
+```bash
+# IMPORTANTE: Revisar plan cuidadosamente antes de aplicar
+terraform plan -var-file="variables.tfvars" -out=prod.tfplan
+
+# Aplicar solo después de aprobación
+terraform apply "prod.tfplan"
+```
+
+## 🔐 Variables Requeridas
+
+Debes configurar estas variables en tus archivos `.tfvars`:
+
+| Variable | Descripción | Ejemplo |
+|----------|-------------|---------|
+| `project_id` | ID del proyecto GCP | `apolo-dev-project` |
+| `region` | Región GCP | `us-south1` |
+| `environment` | Ambiente | `dev`, `qa`, `prod` |
+| `bucket_name` | Nombre base del bucket | `apolo-preavaluos-pdf` |
+
+## 📊 Outputs Importantes
+
+Después del despliegue, puedes obtener:
+
+```bash
+# URL del Cloud Run service
+terraform output cloudrun_service_url
+
+# Nombre del bucket de PDFs
+terraform output pdf_bucket_name
+
+# Repository de Artifact Registry
+terraform output artifact_registry_repo
+
+# Trigger de Eventarc
+terraform output eventarc_trigger_name
+
+# Document AI processors
+terraform output classifier_processor_id
+terraform output extractor_processor_id
+
+# URLs de monitoreo
+terraform output monitoring_urls
+```
+
+## 🧪 Testing Post-Despliegue
+
+### Test de Procesamiento con Eventarc
+
+```bash
+# 1. Subir PDFs de prueba a una carpeta
+gsutil cp test.pdf gs://$(terraform output -raw pdf_bucket_name)/TEST-001/
+
+# 2. Crear archivo is_ready para activar el procesamiento
+echo "" | gsutil cp - gs://$(terraform output -raw pdf_bucket_name)/TEST-001/is_ready
+
+# 3. Ver logs del Cloud Run service
+gcloud logging read "resource.type=cloud_run_revision" --limit=50 --format=json
+
+# 4. Verificar resultados en Firestore
+gcloud firestore documents list folios/TEST-001/documentos
+```
+
+### Test Manual del Cloud Run Service (opcional)
+
+```bash
+# Obtener el comando de test
+CURL_CMD=$(terraform output -raw curl_test_command)
+
+# Ejecutar (requiere autenticación)
+eval "$CURL_CMD"
+```
+
+## 🔄 Workflow de Desarrollo
+
+### 1. Hacer Cambios al Código
+```bash
+# Editar apolo_procesamiento_inteligente.py
+# Editar requirements.txt si es necesario
+# Editar Dockerfile si es necesario
+```
+
+### 2. Build y Push de Nueva Imagen
+```bash
+# Desde Google Cloud Shell
+cd scripts
+./deploy.sh dev TU_PROJECT_ID
+
+# El despliegue completo incluye build, push y deploy
+```
+
+### 3. Deploy con Terraform
+```bash
+cd infrastructure/terraform
+terraform plan -var-file="env/dev.tfvars"
+terraform apply -var-file="env/dev.tfvars"
+```
+
+### 4. Verificar Deployment
+```bash
+# Ver logs del Cloud Run service
+gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=$(terraform output -raw cloudrun_service_name)" \
+  --limit=50 \
+  --format=json
+```
+
+## 🛡️ Mejores Prácticas
+
+### State Management
+- ✅ **Backend remoto en GCS** - State guardado en Cloud Storage
+- ✅ **State locking** - Previene conflictos en equipo
+- ✅ **State por ambiente** - Dev, QA y Prod separados
+
+### Seguridad
+- ✅ **Service Accounts dedicadas** - Mínimos privilegios
+- ✅ **IAM roles específicos** - No usar Owner
+- ✅ **Ingress interno** - Sin exposición pública
+- ✅ **Secrets en Secret Manager** - Cuando sea necesario
+
+### Versionamiento
+- ✅ **Pin Terraform version** - `1.5.7`
+- ✅ **Pin provider versions** - `~> 7.12.0`
+- ✅ **Git tags para releases** - v1.0.0, v1.1.0, etc.
+
+## 🐛 Troubleshooting
+
+### Error: "Backend configuration changed"
+```bash
+terraform init -reconfigure
+```
+
+### Error: "Resource already exists"
+```bash
+# Importar recurso existente
+terraform import google_storage_bucket.pdf_bucket bucket-name
+```
+
+### Error: "APIs not enabled"
+```bash
+# Habilitar APIs manualmente
+gcloud services enable cloudfunctions.googleapis.com \
+  cloudbuild.googleapis.com \
+  storage.googleapis.com \
+  firestore.googleapis.com \
+  --project=YOUR_PROJECT_ID
+```
+
+## 📚 Recursos Adicionales
+
+- [Terraform GCP Provider Docs](https://registry.terraform.io/providers/hashicorp/google/latest/docs)
+- [Cloud Run Documentation](https://cloud.google.com/run/docs)
+- [Eventarc Documentation](https://cloud.google.com/eventarc/docs)
+- [Document AI Documentation](https://cloud.google.com/document-ai/docs)
+- [Firestore Documentation](https://cloud.google.com/firestore/docs)
+- [Artifact Registry Documentation](https://cloud.google.com/artifact-registry/docs)
+
+## 🔗 Referencias Internas
+
+- Código fuente: `../../apolo_procesamiento_inteligente.py`
+- Requirements: `../../requirements.txt`
+- Dockerfile: `../../Dockerfile`
+- Scripts de despliegue: [scripts/README.md](../../scripts/README.md) ⭐ **Actualizado**
+
+## 📞 Soporte
+
+Para problemas o preguntas:
+- Revisar logs en Cloud Console
+- Verificar IAM permissions
+- Consultar documentación del proyecto

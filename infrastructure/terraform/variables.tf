@@ -36,59 +36,95 @@ variable "environment" {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Variables de Cloud Function
+# Variables de Cloud Run
 # ─────────────────────────────────────────────────────────────
 
 variable "function_name" {
-  description = "Nombre de la Cloud Function"
+  description = "Nombre del Cloud Run service"
   type        = string
   default     = "apolo-procesamiento-inteligente"
 }
 
 variable "function_description" {
-  description = "Descripción de la Cloud Function"
+  description = "Descripción del Cloud Run service"
   type        = string
   default     = "Procesamiento inteligente de documentos financieros para preavalúos"
 }
 
-variable "function_runtime" {
-  description = "Runtime de la Cloud Function"
+variable "cloudrun_image" {
+  description = "Imagen Docker para Cloud Run (usar Artifact Registry o Container Registry)"
   type        = string
-  default     = "python311"
 }
 
-variable "function_entry_point" {
-  description = "Punto de entrada de la función"
+variable "cloudrun_cpu" {
+  description = "CPUs asignadas al contenedor"
   type        = string
-  default     = "document_processor"
+  default     = "2"
 }
 
-variable "function_timeout" {
-  description = "Timeout de la función en segundos"
+variable "cloudrun_memory" {
+  description = "Memoria asignada al contenedor"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "cloudrun_timeout" {
+  description = "Timeout del servicio en segundos"
   type        = number
   default     = 540
 }
 
-variable "function_memory" {
-  description = "Memoria asignada a la función (en MB)"
-  type        = string
-  default     = "512M"
-}
-
-variable "function_min_instances" {
+variable "cloudrun_min_instances" {
   description = "Número mínimo de instancias"
   type        = number
   default     = 0
 }
 
-variable "function_max_instances" {
+variable "cloudrun_max_instances" {
   description = "Número máximo de instancias"
   type        = number
   default     = 10
 }
 
+# Variables legacy mantenidas para compatibilidad
+variable "function_runtime" {
+  description = "Runtime (legacy - no usado en Cloud Run)"
+  type        = string
+  default     = "python311"
+}
+
+variable "function_entry_point" {
+  description = "Entry point (legacy - no usado en Cloud Run)"
+  type        = string
+  default     = "process_folder_on_ready"
+}
+
+variable "function_timeout" {
+  description = "Timeout (legacy - usar cloudrun_timeout)"
+  type        = number
+  default     = 540
+}
+
+variable "function_memory" {
+  description = "Memoria (legacy - usar cloudrun_memory)"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "function_min_instances" {
+  description = "Min instances (legacy - usar cloudrun_min_instances)"
+  type        = number
+  default     = 0
+}
+
+variable "function_max_instances" {
+  description = "Max instances (legacy - usar cloudrun_max_instances)"
+  type        = number
+  default     = 10
+}
+
 variable "function_source_dir" {
-  description = "Directorio con el código fuente de la función"
+  description = "Source dir (legacy - no usado en Cloud Run)"
   type        = string
   default     = "../../"
 }
@@ -133,7 +169,7 @@ variable "firestore_database_name" {
 variable "firestore_location" {
   description = "Ubicación de Firestore"
   type        = string
-  default     = "nam5"
+  default     = "us-south1"
 }
 
 variable "firestore_collection_ttl_days" {
@@ -143,27 +179,6 @@ variable "firestore_collection_ttl_days" {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Variables de Cloud Workflows
-# ─────────────────────────────────────────────────────────────
-
-variable "workflow_name" {
-  description = "Nombre del Cloud Workflow"
-  type        = string
-  default     = "apolo-procesamiento-workflow"
-}
-
-variable "workflow_description" {
-  description = "Descripción del Cloud Workflow"
-  type        = string
-  default     = "Orquestación del procesamiento de documentos financieros"
-}
-
-variable "workflow_source_file" {
-  description = "Archivo fuente del workflow YAML"
-  type        = string
-  default     = "../../workflow.yaml"
-}
-
 # ─────────────────────────────────────────────────────────────
 # Variables de Service Account
 # ─────────────────────────────────────────────────────────────
@@ -250,15 +265,65 @@ variable "required_apis" {
   description = "APIs de GCP requeridas para el proyecto"
   type        = list(string)
   default = [
-    "cloudfunctions.googleapis.com",
+    "run.googleapis.com",
     "cloudbuild.googleapis.com",
+    "artifactregistry.googleapis.com",
     "storage.googleapis.com",
     "firestore.googleapis.com",
-    "workflows.googleapis.com",
-    "run.googleapis.com",
     "logging.googleapis.com",
     "monitoring.googleapis.com",
     "cloudtrace.googleapis.com",
     "iam.googleapis.com",
+    "documentai.googleapis.com",
+    "pubsub.googleapis.com",
+    "eventarc.googleapis.com",
   ]
+}
+
+# ─────────────────────────────────────────────────────────────
+# Variables de Document AI
+# ─────────────────────────────────────────────────────────────
+
+variable "documentai_classifier_type" {
+  description = "Tipo de Document AI Classifier processor"
+  type        = string
+  default     = "DOCUMENT_CLASSIFIER"
+}
+
+variable "documentai_extractor_type" {
+  description = "Tipo de Document AI Extractor processor"
+  type        = string
+  default     = "FORM_PARSER_PROCESSOR"
+}
+
+# ─────────────────────────────────────────────────────────────
+# Variables de Pub/Sub (DLQ)
+# ─────────────────────────────────────────────────────────────
+
+variable "dlq_topic_name" {
+  description = "Nombre del Pub/Sub topic para Dead Letter Queue"
+  type        = string
+  default     = "apolo-preavaluo-dlq"
+}
+
+variable "dlq_retention_days" {
+  description = "Días de retención de mensajes en DLQ"
+  type        = number
+  default     = 7
+}
+
+# ─────────────────────────────────────────────────────────────
+# Variables de Eventarc
+# ─────────────────────────────────────────────────────────────
+
+variable "enable_eventarc" {
+  description = "Habilitar Eventarc trigger para GCS"
+  type        = bool
+  default     = true
+}
+
+variable "eventarc_trigger_name" {
+  description = "Nombre del Eventarc trigger"
+  type        = string
+  default     = "apolo-gcs-trigger"
 }

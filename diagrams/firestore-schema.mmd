@@ -1,0 +1,67 @@
+flowchart TD
+
+    subgraph R["runs/{runId}"]
+        R_id[runId]
+        R_pre[preavaluo_id]
+        R_bucket[sourceBucket]
+        R_prefix[folderPrefix]
+        R_status[status]
+        R_docCount[documentCount]
+        R_procCount[processedCount]
+        R_failCount[failedCount]
+        R_created[createdAt]
+        R_updated[updatedAt]
+    end
+
+    R --> D["runs/{runId}/documents/{docId}"]
+
+    subgraph D["documents/{docId}"]
+        D_docId[docId]
+        D_runId[runId]
+        D_folio[folioId]
+        D_fileId[fileId]
+        D_gcs[gcsUri]
+        D_status[status]
+        D_start[processingStartedAt]
+        D_end[processedAt]
+        D_created2[createdAt]
+        D_updated2[updatedAt]
+
+        subgraph CLASS["classification"]
+            C_type[documentType]
+            C_conf[confidence]
+            C_ver[classifierVersion]
+        end
+
+        subgraph EXTR["extraction"]
+            subgraph FIELDS["fields"]
+                F_org[ORG_NAME]
+                F_period[REPORTING_PERIOD]
+                F_currency[CURRENCY]
+                F_scale[UNITS_SCALE]
+                F_title[STATEMENT_TITLE]
+
+                subgraph LINES["line_items[]"]
+                    L_name[LINE_ITEM_NAME]
+                    L_value[LINE_ITEM_VALUE]
+                    L_year[COLUMN_YEAR]
+                    L_section[SECTION_HEADER]
+                    L_total[TOTAL_LABEL]
+                end
+            end
+
+            subgraph META["metadata"]
+                M_pages[page_count]
+                M_procVer[processor_version]
+                M_schema[extraction_schema_version]
+                M_mime[mime_type]
+                M_decision[decision_path]
+                M_refs[table_references[]]
+            end
+        end
+
+        subgraph ERR["error?"]
+            E_code[code]
+            E_msg[message]
+        end
+    end
