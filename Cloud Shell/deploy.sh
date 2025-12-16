@@ -168,21 +168,25 @@ print_info "Granting IAM roles..."
 gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:$SA_EMAIL" \
     --role="roles/storage.objectViewer" \
+    --condition=None \
     --quiet
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:$SA_EMAIL" \
     --role="roles/datastore.user" \
+    --condition=None \
     --quiet
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:$SA_EMAIL" \
     --role="roles/documentai.apiUser" \
+    --condition=None \
     --quiet
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
     --member="serviceAccount:$SA_EMAIL" \
     --role="roles/pubsub.publisher" \
+    --condition=None \
     --quiet
 
 print_status "IAM roles configured"
