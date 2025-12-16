@@ -189,6 +189,12 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
     --condition=None \
     --quiet
 
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/eventarc.eventReceiver" \
+    --condition=None \
+    --quiet
+
 print_status "IAM roles configured"
 
 # Step 3: Create Cloud Storage bucket
