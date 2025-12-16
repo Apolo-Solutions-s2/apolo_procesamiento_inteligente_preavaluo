@@ -1,21 +1,21 @@
 # Script para limpiar archivos obsoletos (PowerShell)
 # Este script elimina los scripts antiguos que han sido reemplazados
 
-Write-Host "🧹 Limpiando archivos obsoletos..." -ForegroundColor Blue
+Write-Host "Limpiando archivos obsoletos..." -ForegroundColor Blue
 Write-Host ""
 
 # Eliminar carpeta bash/
 if (Test-Path "bash") {
     Write-Host "  Eliminando bash/" -ForegroundColor Yellow
     Remove-Item -Recurse -Force "bash"
-    Write-Host "  ✓ bash/ eliminada" -ForegroundColor Green
+    Write-Host "  OK - bash/ eliminada" -ForegroundColor Green
 }
 
 # Eliminar carpeta powershell/
 if (Test-Path "powershell") {
     Write-Host "  Eliminando powershell/" -ForegroundColor Yellow
     Remove-Item -Recurse -Force "powershell"
-    Write-Host "  ✓ powershell/ eliminada" -ForegroundColor Green
+    Write-Host "  OK - powershell/ eliminada" -ForegroundColor Green
 }
 
 # Eliminar scripts legacy individuales
@@ -29,12 +29,12 @@ foreach ($file in $filesToRemove) {
     if (Test-Path $file) {
         Write-Host "  Eliminando $file" -ForegroundColor Yellow
         Remove-Item $file
-        Write-Host "  ✓ $file eliminado" -ForegroundColor Green
+        Write-Host "  OK - $file eliminado" -ForegroundColor Green
     }
 }
 
 Write-Host ""
-Write-Host "✅ Limpieza completada!" -ForegroundColor Green
+Write-Host "Limpieza completada!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Archivos restantes:" -ForegroundColor Cyan
 Get-ChildItem
