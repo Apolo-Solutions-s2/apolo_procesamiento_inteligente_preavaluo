@@ -263,7 +263,6 @@ else
         --destination-run-region=$REGION \
         --event-filters="type=google.cloud.storage.object.v1.finalized" \
         --event-filters="bucket=$BUCKET_NAME" \
-        --event-filters="pathPattern=*/is_ready" \
         --service-account=$SA_EMAIL \
         --project=$PROJECT_ID \
         --quiet
