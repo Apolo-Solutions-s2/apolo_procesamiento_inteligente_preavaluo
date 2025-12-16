@@ -66,7 +66,7 @@ Se han simplificado los scripts de despliegue para optimizar su uso en **Google 
 ### Ahora (Scripts simplificados):
 ```bash
 # Un solo comando
-./deploy.sh dev apolo-dev-project
+./deploy.sh dev apolo-dev-478018
 ```
 
 ## 🌐 Optimizado para Google Cloud Shell

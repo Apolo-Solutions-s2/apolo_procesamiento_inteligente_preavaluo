@@ -328,7 +328,7 @@ terraform apply -var-file="env/prod.tfvars"
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `service_name` | Cloud Run service name | `apolo-procesamiento-inteligente` |
-| `bucket_name` | GCS bucket name | `{project_id}-preavaluos-pdf` |
+| `bucket_name` | GCS bucket name | `apolo-preavaluos-pdf-dev` |
 | `firestore_database` | Firestore database name | `apolo-preavaluos-{env}` |
 | `container_image` | Container image URL | Latest from GCR |
 | `memory` | Service memory allocation | `1Gi` |
@@ -643,10 +643,10 @@ Debes configurar estas variables en tus archivos `.tfvars`:
 
 | Variable | Descripción | Ejemplo |
 |----------|-------------|---------|
-| `project_id` | ID del proyecto GCP | `apolo-dev-project` |
+| `project_id` | ID del proyecto GCP | `apolo-dev-478018` |
 | `region` | Región GCP | `us-south1` |
 | `environment` | Ambiente | `dev`, `qa`, `prod` |
-| `bucket_name` | Nombre base del bucket | `apolo-preavaluos-pdf` |
+| `bucket_name` | Nombre base del bucket | `apolo-preavaluos-pdf-dev` |
 
 ## 📊 Outputs Importantes
 

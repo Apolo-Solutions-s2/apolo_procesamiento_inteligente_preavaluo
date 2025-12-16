@@ -132,16 +132,16 @@ cd scripts
 ./cleanup.sh
 
 # 2. Configuración inicial
-./setup.sh apolo-dev-project
+./setup.sh apolo-dev-478018
 
 # 3. Despliegue
-./deploy.sh dev apolo-dev-project
+./deploy.sh dev apolo-dev-478018
 ```
 
 ### Despliegues Posteriores:
 ```bash
 cd scripts
-./deploy.sh dev apolo-dev-project
+./deploy.sh dev apolo-dev-478018
 ```
 
 ## 📊 Métricas de Mejora

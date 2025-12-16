@@ -8,7 +8,7 @@
 # Proyecto y Región
 # ─────────────────────────────────────────────────────────────
 
-project_id  = "apolo-dev-project"
+project_id  = "apolo-dev-478018"
 region      = "us-south1"
 zone        = "us-south1-a"
 environment = "dev"
@@ -21,7 +21,7 @@ function_name        = "apolo-procesamiento-inteligente"
 function_description = "Procesamiento inteligente de documentos financieros - DEV"
 
 # Imagen Docker desde Artifact Registry
-cloudrun_image = "us-south1-docker.pkg.dev/apolo-dev-project/apolo-docker-repo/apolo-procesamiento:latest"
+cloudrun_image = "us-south1-docker.pkg.dev/apolo-dev-478018/apolo-docker-repo/apolo-procesamiento:latest"
 
 # Dev: Recursos reducidos
 cloudrun_cpu            = "1"
@@ -34,7 +34,7 @@ cloudrun_max_instances  = 3    # Límite bajo para dev
 # Cloud Storage
 # ─────────────────────────────────────────────────────────────
 
-bucket_name          = "apolo-preavaluos-pdf"
+bucket_name          = "apolo-preavaluos-pdf-dev"
 bucket_location      = "US-SOUTH1"
 bucket_storage_class = "STANDARD"
 bucket_lifecycle_age = 30  # Mover a nearline después de 30 días en dev

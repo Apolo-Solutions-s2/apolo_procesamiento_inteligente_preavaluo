@@ -43,13 +43,13 @@ gcloud services enable artifactregistry.googleapis.com
 ### 5. Infrastructure Resources
 
 #### Cloud Storage
-- [ ] Bucket created: `preavaluos-pdf`
+- [ ] Bucket created: `apolo-preavaluos-pdf-dev`
   ```bash
-  gsutil mb -p PROJECT_ID -l us-south1 gs://preavaluos-pdf
+  gsutil mb -p apolo-dev-478018 -l us-south1 gs://apolo-preavaluos-pdf-dev
   ```
 - [ ] Versioning enabled
   ```bash
-  gsutil versioning set on gs://preavaluos-pdf
+  gsutil versioning set on gs://apolo-preavaluos-pdf-dev
   ```
 - [ ] Lifecycle policy configured (optional)
 - [ ] Test PDF uploaded for validation
@@ -77,7 +77,7 @@ gcloud services enable artifactregistry.googleapis.com
 - [ ] `requirements.txt` complete
 - [ ] `.dockerignore` configured
 - [ ] Environment variables defined:
-  - [ ] `BUCKET_NAME=preavaluos-pdf`
+  - [ ] `BUCKET_NAME=apolo-preavaluos-pdf-dev`
   - [ ] `FIRESTORE_DATABASE=apolo-preavaluos-dev`
   - [ ] `PORT=8080` (default)
 
@@ -106,7 +106,7 @@ gcloud services enable artifactregistry.googleapis.com
     --memory 1Gi \
     --timeout 300s \
     --max-instances 100 \
-    --set-env-vars BUCKET_NAME=preavaluos-pdf,FIRESTORE_DATABASE=apolo-preavaluos-dev
+    --set-env-vars BUCKET_NAME=apolo-preavaluos-pdf-dev,FIRESTORE_DATABASE=apolo-preavaluos-dev
   ```
 - [ ] Deployment completed successfully
 - [ ] Service URL obtained
@@ -151,7 +151,7 @@ curl $SERVICE_URL/health
 curl -X POST "${SERVICE_URL}" \
   -H "Content-Type: application/json" \
   -d '{
-    "gcs_pdf_uri": "gs://preavaluos-pdf/test.pdf",
+    "gcs_pdf_uri": "gs://apolo-preavaluos-pdf-dev/test.pdf",
     "folioId": "TEST-001",
     "fileId": "test.pdf"
   }'
@@ -180,10 +180,10 @@ curl -X POST "${SERVICE_URL}" \
 Run the same request twice:
 ```bash
 # First run
-curl -X POST "${SERVICE_URL}" -H "Content-Type: application/json" -d '{"gcs_pdf_uri": "gs://preavaluos-pdf/test.pdf", "folioId": "IDEM-001", "fileId": "test.pdf"}'
+curl -X POST "${SERVICE_URL}" -H "Content-Type: application/json" -d '{"gcs_pdf_uri": "gs://apolo-preavaluos-pdf-dev/test.pdf", "folioId": "IDEM-001", "fileId": "test.pdf"}'
 
 # Second run (should use cache)
-curl -X POST "${SERVICE_URL}" -H "Content-Type: application/json" -d '{"gcs_pdf_uri": "gs://preavaluos-pdf/test.pdf", "folioId": "IDEM-001", "fileId": "test.pdf"}'
+curl -X POST "${SERVICE_URL}" -H "Content-Type: application/json" -d '{"gcs_pdf_uri": "gs://apolo-preavaluos-pdf-dev/test.pdf", "folioId": "IDEM-001", "fileId": "test.pdf"}'
 ```
 - [ ] Test 4 passed
 - [ ] Second request faster

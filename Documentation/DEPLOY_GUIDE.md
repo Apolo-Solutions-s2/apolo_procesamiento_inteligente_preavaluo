@@ -82,7 +82,7 @@ Write-Host "✓ APIs habilitadas" -ForegroundColor Green
 
 ```powershell
 # Nombre del bucket (debe ser único globalmente)
-$BUCKET_NAME = "preavaluos-pdf-$PROJECT_ID"
+$BUCKET_NAME = "apolo-preavaluos-pdf-dev"
 
 # Crear bucket
 gsutil mb -l us-south1 gs://$BUCKET_NAME
@@ -357,8 +357,8 @@ gcloud container images delete "${IMAGE_NAME}:latest" --quiet
 
 **Variables para copiar:**
 ```powershell
-$PROJECT_ID = "TU_PROJECT_ID"
-$BUCKET_NAME = "preavaluos-pdf-$PROJECT_ID"
+$PROJECT_ID = "apolo-dev-478018"
+$BUCKET_NAME = "apolo-preavaluos-pdf-dev"
 $SERVICE_NAME = "apolo-procesamiento-inteligente"
 $SA_NAME = "apolo-procesamiento-sa"
 $REGION = "us-south1"

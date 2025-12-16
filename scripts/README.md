@@ -13,7 +13,7 @@ Configura el proyecto GCP por primera vez: habilita APIs, crea service accounts 
 
 **Ejemplo:**
 ```bash
-./setup.sh apolo-dev-project
+./setup.sh apolo-dev-478018
 ```
 
 **Qué hace:**
@@ -31,7 +31,7 @@ Despliega la aplicación completa: construye la imagen Docker, despliega infraes
 
 **Ejemplos:**
 ```bash
-./deploy.sh dev apolo-dev-project
+./deploy.sh dev apolo-dev-478018
 ./deploy.sh prod apolo-prod-project
 ```
 
@@ -55,17 +55,17 @@ cd apolo_procesamiento_inteligente_preavaluo/scripts
 chmod +x setup.sh deploy.sh
 
 # 3. Ejecutar setup inicial
-./setup.sh apolo-dev-project
+./setup.sh apolo-dev-478018
 
 # 4. Desplegar aplicación
-./deploy.sh dev apolo-dev-project
+./deploy.sh dev apolo-dev-478018
 ```
 
 ### Despliegues siguientes:
 
 ```bash
 # Solo ejecutar deploy
-./deploy.sh dev apolo-dev-project
+./deploy.sh dev apolo-dev-478018
 ```
 
 ## 🌍 Ambientes
@@ -201,14 +201,14 @@ scripts/
   -Environment dev `
   -ProjectId "tu-project-id" `
   -Region "us-south1" `
-  -BucketName "preavaluos-pdf"
+  -BucketName "apolo-preavaluos-pdf-dev"
 ```
 
 **Parámetros**:
 - `-Environment`: Entorno (dev, qa, prod)
 - `-ProjectId`: ID del proyecto GCP
 - `-Region`: Región de despliegue (default: us-south1)
-- `-BucketName`: Nombre del bucket GCS (default: preavaluos-pdf)
+- `-BucketName`: Nombre del bucket GCS (default: apolo-preavaluos-pdf-dev)
 
 **Funcionalidad**:
 1. Valida requisitos (gcloud, docker)
@@ -390,16 +390,16 @@ Los scripts usan estas variables de entorno (opcionales):
 
 ```powershell
 # PowerShell
-$env:GCP_PROJECT_ID = "tu-project-id"
+$env:GCP_PROJECT_ID = "apolo-dev-478018"
 $env:GCP_REGION = "us-south1"
-$env:BUCKET_NAME = "preavaluos-pdf"
+$env:BUCKET_NAME = "apolo-preavaluos-pdf-dev"
 ```
 
 ```bash
 # Bash
-export GCP_PROJECT_ID="tu-project-id"
+export GCP_PROJECT_ID="apolo-dev-478018"
 export GCP_REGION="us-south1"
-export BUCKET_NAME="preavaluos-pdf"
+export BUCKET_NAME="apolo-preavaluos-pdf-dev"
 ```
 
 ---
