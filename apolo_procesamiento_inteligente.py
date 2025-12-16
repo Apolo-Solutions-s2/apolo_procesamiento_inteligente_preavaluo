@@ -43,8 +43,9 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 LOCATION = os.environ.get("PROCESSOR_LOCATION", "us-south1")
-CLASSIFIER_PROCESSOR_ID = os.environ.get("CLASSIFIER_PROCESSOR_ID", "")
-EXTRACTOR_PROCESSOR_ID = os.environ.get("EXTRACTOR_PROCESSOR_ID", "")
+CLASSIFIER_PROCESSOR_NAME = os.environ.get("CLASSIFIER_PROCESSOR_NAME", "apolo-preavaluo-clasificador-dev")
+ER_EXTRACTOR_PROCESSOR_NAME = os.environ.get("ER_EXTRACTOR_PROCESSOR_NAME", "apolo-preavaluo-er-extractor-dev")
+ESF_EXTRACTOR_PROCESSOR_NAME = os.environ.get("ESF_EXTRACTOR_PROCESSOR_NAME", "apolo-preavaluo-esfextractor-dev")
 DLQ_TOPIC_NAME = os.environ.get("DLQ_TOPIC_NAME", "apolo-preavaluo-dlq")
 MAX_CONCURRENT_DOCS = int(os.environ.get("MAX_CONCURRENT_DOCS", "8"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "3"))
@@ -249,10 +250,10 @@ def _process_document_ai_with_retry(processor_name: str, gcs_uri: str) -> Option
 def classify_document(gcs_uri: str) -> Dict[str, Any]:
     """Clasifica documento usando Document AI Classifier."""
     try:
-        if not CLASSIFIER_PROCESSOR_ID:
+        if not CLASSIFIER_PROCESSOR_NAME:
             return {"document_type": "UNKNOWN", "confidence": 0.0, "classifier_version": "not_configured"}
         
-        processor_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{CLASSIFIER_PROCESSOR_ID}"
+        processor_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{CLASSIFIER_PROCESSOR_NAME}"
         document = _process_document_ai_with_retry(processor_name, gcs_uri)
         
         if not document:
@@ -280,10 +281,20 @@ def classify_document(gcs_uri: str) -> Dict[str, Any]:
 def extract_document_data(gcs_uri: str, doc_type: str) -> Dict[str, Any]:
     """Extrae datos estructurados con Document AI Extractor con trazabilidad completa."""
     try:
-        if not EXTRACTOR_PROCESSOR_ID:
+        # Seleccionar el processor apropiado basado en el tipo de documento
+        if doc_type == "ESTADO_RESULTADOS":
+            processor_name_env = ER_EXTRACTOR_PROCESSOR_NAME
+        elif doc_type == "ESTADO_SITUACION_FINANCIERA":
+            processor_name_env = ESF_EXTRACTOR_PROCESSOR_NAME
+        else:
+            # Para otros tipos o desconocido, usar ER por defecto (o manejar error)
+            logger.warning(f"No specific extractor for doc_type {doc_type}, using ER extractor")
+            processor_name_env = ER_EXTRACTOR_PROCESSOR_NAME
+        
+        if not processor_name_env:
             return _generate_fallback_extraction()
         
-        processor_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{EXTRACTOR_PROCESSOR_ID}"
+        processor_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/processors/{processor_name_env}"
         document = _process_document_ai_with_retry(processor_name, gcs_uri)
         
         if not document:

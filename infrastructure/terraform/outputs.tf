@@ -116,14 +116,24 @@ output "classifier_processor_name" {
   value       = google_document_ai_processor.classifier.display_name
 }
 
-output "extractor_processor_id" {
-  description = "ID del Document AI Extractor processor"
-  value       = google_document_ai_processor.extractor.id
+output "er_extractor_processor_id" {
+  description = "ID del Document AI ER Extractor processor"
+  value       = google_document_ai_processor.er_extractor.id
 }
 
-output "extractor_processor_name" {
-  description = "Nombre del Document AI Extractor processor"
-  value       = google_document_ai_processor.extractor.display_name
+output "er_extractor_processor_name" {
+  description = "Nombre del Document AI ER Extractor processor"
+  value       = google_document_ai_processor.er_extractor.display_name
+}
+
+output "esf_extractor_processor_id" {
+  description = "ID del Document AI ESF Extractor processor"
+  value       = google_document_ai_processor.esf_extractor.id
+}
+
+output "esf_extractor_processor_name" {
+  description = "Nombre del Document AI ESF Extractor processor"
+  value       = google_document_ai_processor.esf_extractor.display_name
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -237,7 +247,8 @@ output "resource_summary" {
     pdf_bucket            = google_storage_bucket.pdf_bucket.name
     firestore_database    = google_firestore_database.main.name
     classifier_processor  = google_document_ai_processor.classifier.display_name
-    extractor_processor   = google_document_ai_processor.extractor.display_name
+    er_extractor_processor = google_document_ai_processor.er_extractor.display_name
+    esf_extractor_processor = google_document_ai_processor.esf_extractor.display_name
     dlq_topic            = google_pubsub_topic.dlq.name
     eventarc_trigger     = var.enable_eventarc ? google_eventarc_trigger.gcs_trigger[0].name : "disabled"
     artifact_registry    = google_artifact_registry_repository.docker_repo.id

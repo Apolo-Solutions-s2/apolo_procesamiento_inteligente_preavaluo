@@ -58,17 +58,27 @@ resource "google_service_account" "function_sa" {
 # Classifier Processor - Clasifica tipos de documentos
 resource "google_document_ai_processor" "classifier" {
   location     = var.region
-  display_name = "apolo-classifier-${var.environment}"
+  display_name = "apolo-preavaluo-clasificador-${var.environment}"
   type         = var.documentai_classifier_type
   project      = var.project_id
 
   depends_on = [google_project_service.required_apis]
 }
 
-# Extractor Processor - Extrae datos estructurados
-resource "google_document_ai_processor" "extractor" {
+# ER Extractor Processor - Extrae datos de Estados de Resultados
+resource "google_document_ai_processor" "er_extractor" {
   location     = var.region
-  display_name = "apolo-extractor-${var.environment}"
+  display_name = "apolo-preavaluo-er-extractor-${var.environment}"
+  type         = var.documentai_extractor_type
+  project      = var.project_id
+
+  depends_on = [google_project_service.required_apis]
+}
+
+# ESF Extractor Processor - Extrae datos de Estado de Situación Financiera
+resource "google_document_ai_processor" "esf_extractor" {
+  location     = var.region
+  display_name = "apolo-preavaluo-esfextractor-${var.environment}"
   type         = var.documentai_extractor_type
   project      = var.project_id
 
@@ -311,13 +321,18 @@ resource "google_cloud_run_v2_service" "processor" {
       }
 
       env {
-        name  = "CLASSIFIER_PROCESSOR_ID"
-        value = google_document_ai_processor.classifier.id
+        name  = "CLASSIFIER_PROCESSOR_NAME"
+        value = google_document_ai_processor.classifier.display_name
       }
 
       env {
-        name  = "EXTRACTOR_PROCESSOR_ID"
-        value = google_document_ai_processor.extractor.id
+        name  = "ER_EXTRACTOR_PROCESSOR_NAME"
+        value = google_document_ai_processor.er_extractor.display_name
+      }
+
+      env {
+        name  = "ESF_EXTRACTOR_PROCESSOR_NAME"
+        value = google_document_ai_processor.esf_extractor.display_name
       }
 
       env {
