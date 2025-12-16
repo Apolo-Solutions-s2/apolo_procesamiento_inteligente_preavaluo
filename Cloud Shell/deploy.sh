@@ -147,47 +147,45 @@ if [[ "$RESUME_MODE" = false ]]; then
 fi
 
 # Step 2: Create service account
-if [[ "$RESUME_MODE" = false ]]; then
-    print_header "Step 2: Creating Service Account"
+print_header "Step 2: Creating Service Account"
 
-    SA_EMAIL="${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+SA_EMAIL="${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-    if gcloud iam service-accounts describe $SA_EMAIL --project=$PROJECT_ID &>/dev/null; then
-        print_info "Service account already exists: $SA_EMAIL"
-    else
-        gcloud iam service-accounts create $SERVICE_ACCOUNT_NAME \
-            --description="Service account for Apolo Document Processing Service" \
-            --display-name="Apolo Processing SA" \
-            --project=$PROJECT_ID \
-            --quiet
-
-        print_status "Created service account: $SA_EMAIL"
-    fi
-
-    # Grant roles
-    print_info "Granting IAM roles..."
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SA_EMAIL" \
-        --role="roles/storage.objectViewer" \
+if gcloud iam service-accounts describe $SA_EMAIL --project=$PROJECT_ID &>/dev/null; then
+    print_info "Service account already exists: $SA_EMAIL"
+else
+    gcloud iam service-accounts create $SERVICE_ACCOUNT_NAME \
+        --description="Service account for Apolo Document Processing Service" \
+        --display-name="Apolo Processing SA" \
+        --project=$PROJECT_ID \
         --quiet
 
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SA_EMAIL" \
-        --role="roles/datastore.user" \
-        --quiet
-
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SA_EMAIL" \
-        --role="roles/documentai.apiUser" \
-        --quiet
-
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member="serviceAccount:$SA_EMAIL" \
-        --role="roles/pubsub.publisher" \
-        --quiet
-
-    print_status "IAM roles configured"
+    print_status "Created service account: $SA_EMAIL"
 fi
+
+# Grant roles
+print_info "Granting IAM roles..."
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/storage.objectViewer" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/datastore.user" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/documentai.apiUser" \
+    --quiet
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/pubsub.publisher" \
+    --quiet
+
+print_status "IAM roles configured"
 
 # Step 3: Create Cloud Storage bucket
 if [[ "$RESUME_MODE" = false ]]; then
