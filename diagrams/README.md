@@ -2,19 +2,29 @@
 
 This folder contains Mermaid diagrams for the Apolo Ingesta Documentos Preavaluo project.
 
+# Diagrams
+
+This folder contains Mermaid diagrams for the Apolo Procesamiento Inteligente Preavaluo project.
+
 ## Diagrams
 
-### 1. Firestore Schema (firestore-schema.mmd / firestore-schema-simple.png)
+### 1. Firestore Schema (firestore-schema.mmd / firestore-schema-simple.mmd)
 
-This diagram illustrates the complete Firestore database schema used for tracking document processing runs. The schema is organized into two main collections: `runs` (parent collection) and `documents` (subcollection). The `runs` collection stores metadata about each processing batch, including the preavaluo ID, source bucket information, folder prefix, processing status, and counters for total, processed, and failed documents. Each run contains a subcollection of `documents` that tracks individual file processing. Each document record includes identifiers (docId, runId, folioId, fileId), the GCS URI, processing status and timestamps, plus three nested objects: `classification` (containing the detected document type, confidence score, and classifier version), `extraction` (with structured fields like organization name, reporting period, currency, and line items, plus metadata about processing version and table references), and an optional `error` object for failure cases. This hierarchical structure enables efficient tracking and querying of both batch-level and document-level processing states.
+These diagrams illustrate the complete Firestore database schema used for tracking document processing. The schema is organized hierarchically:
 
-### 2. Architecture Data Flow (architecture-dataflow.mmd / architecture-dataflow.png)
+- **folios/{folioId}**: Parent collection storing metadata about each processing batch (folder), including bucket, folder_prefix, status, document counts, and timestamps.
+- **folios/{folioId}/documentos/{docId}**: Subcollection tracking individual document processing with GCS URI, generation for idempotencia, classification results, and status.
+- **folios/{folioId}/documentos/{docId}/extracciones/{extractionId}**: Subcollection storing structured extraction results with fields like organization name, reporting period, currency, and line items, plus metadata.
 
-This diagram depicts the high-level architecture and data flow between the major Google Cloud Platform components in the document processing pipeline. The flow begins when Cloud Workflows invokes the Cloud Run Job with parameters (runId and folderPrefix). The Cloud Run Job orchestrates the entire process: it lists and loads PDF files from Cloud Storage, sends them to Document AI's Classifier processor to determine document types, then routes them to the appropriate Document AI Extractor processor to extract structured financial data. Throughout processing, the job writes metadata to Firestore—both at the run level (`runs/{runId}`) to track overall progress and at the document level (`runs/{runId}/documents/{docId}`) to store individual results. If processing failures exceed a defined threshold, the job publishes messages to a Pub/Sub Dead Letter Queue (DLQ) for error handling and alerting. This architecture ensures scalable, reliable document processing with comprehensive tracking and error recovery mechanisms.
+This hierarchical structure enables efficient tracking of folder-level and document-level processing states with full idempotencia.
 
-### 3. End-to-End Sequence (sequence-diagram.mmd / sequence-diagram.png)
+### 2. Architecture Data Flow (architecture-dataflow.mmd)
 
-This sequence diagram provides a detailed step-by-step view of the document processing workflow from initiation to completion. The process starts when Cloud Workflow invokes the Cloud Run Job with a runId and folderPrefix. The job immediately creates a run record in Firestore with status "processing". It then lists all PDF files in the specified Cloud Storage folder and begins iterating through each file. For each document, the job creates a document record in Firestore (status "processing"), downloads the PDF from Cloud Storage, sends it to the Document AI Classifier to identify the document type, and then sends it to the Document AI Extractor to extract structured fields (organization name, financial statement data, line items, etc.). After processing each document, the job updates the document record in Firestore with the classification and extraction results (status "completed"), and increments the processing counters in the parent run record. Once all files are processed, the job updates the run status to "completed" and returns a processing summary to the Cloud Workflow. This sequence ensures atomic tracking of each processing step with full visibility into the pipeline's progress.
+This diagram depicts the high-level architecture and data flow between Google Cloud Platform components. The flow begins when Eventarc detects the creation of an 'is_ready' sentinel file in Cloud Storage, triggering the Cloud Run service. The service processes PDFs in parallel: lists files from GCS, downloads PDFs, classifies them using Document AI Classifier (us-south1), extracts structured data with Document AI Extractor (us-south1), and persists results to Firestore. Structured logs are sent to Cloud Logging, and persistent failures are published to Pub/Sub DLQ. The architecture ensures scalable, reliable document processing with comprehensive observability.
+
+### 3. End-to-End Sequence (sequence-diagram.mmd)
+
+This sequence diagram provides a detailed step-by-step view of the document processing workflow. The process starts when Eventarc triggers the Cloud Run service upon detecting an 'is_ready' file. The service creates a folio record in Firestore, logs the start, lists PDFs, and processes them in parallel. For each document, it updates status to IN_PROGRESS, downloads the PDF, classifies and extracts data using Document AI, persists results to Firestore, and logs each step with specific event_types. Failed documents are sent to DLQ, and the folio is marked as DONE or DONE_WITH_ERRORS. This sequence ensures atomic tracking with idempotencia and full logging for observability.
 
 ## Viewing the Diagrams
 

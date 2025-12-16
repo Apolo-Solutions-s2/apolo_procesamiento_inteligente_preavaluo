@@ -1,3 +1,46 @@
+# Resumen de Cambios - Apolo Procesamiento Inteligente
+
+## 🆕 Cambios Recientes (Diciembre 2025)
+
+### 🔧 Actualizaciones de Código y Configuración
+
+1. **Región por Defecto**: Cambiada a `us-south1` para todos los servicios GCP
+   - Actualizado `PROCESSOR_LOCATION` en código Python
+   - Configurado en `docker-compose.yml` y scripts de deployment
+
+2. **Requirements Actualizados**:
+   - `functions-framework==3.5.0`
+   - `google-cloud-storage==2.14.0`
+   - `google-cloud-firestore==2.15.0`
+   - `google-cloud-documentai==2.24.0`
+   - `google-cloud-pubsub==2.19.0`
+   - Eliminado `flask` (redundante)
+
+3. **Logs Estructurados Mejorados**:
+   - `event_type` específico por documento: `folio_{folio_id}_doc_{doc_id}_processing_start`
+   - Incluye `folio_id` y `doc_id` para mejor trazabilidad en procesamiento paralelo
+
+4. **Idempotencia Completa Implementada**:
+   - Por `generation` de GCS en documentos
+   - Por estado de carpeta (evita re-procesamiento de folios completados)
+
+5. **Esquema Firestore Actualizado**:
+   - `folios/{folioId}/documentos/{docId}/extracciones/{extractionId}`
+   - Campos completos: `generation`, `classifier_confidence`, `error_type`, etc.
+
+6. **Docker Files Alineados**:
+   - Variables de entorno completas en `docker-compose.yml`
+   - Región `us-south1` configurada por defecto
+
+### 📚 Documentación Actualizada
+
+- **FIRESTORE_SCHEMA.md**: Esquema completo actualizado
+- **PROJECT_STATUS.md**: Idempotencia y logs marcados como funcionales
+- **DEPLOY_GUIDE.md** y **QUICKSTART.md**: Configuración de región `us-south1`
+- **GCP_COMMANDS.md**: Ya alineado con `us-south1`
+
+---
+
 # Resumen de Cambios - Simplificación de Scripts
 
 ## ✅ Cambios Completados

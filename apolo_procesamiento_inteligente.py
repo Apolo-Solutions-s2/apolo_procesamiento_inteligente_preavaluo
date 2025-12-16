@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION: Variables de entorno para servicios GCP y límites de procesamiento
 # ═══════════════════════════════════════════════════════════════════════════════
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
-LOCATION = os.environ.get("PROCESSOR_LOCATION", "us")
+LOCATION = os.environ.get("PROCESSOR_LOCATION", "us-south1")
 CLASSIFIER_PROCESSOR_ID = os.environ.get("CLASSIFIER_PROCESSOR_ID", "")
 EXTRACTOR_PROCESSOR_ID = os.environ.get("EXTRACTOR_PROCESSOR_ID", "")
 DLQ_TOPIC_NAME = os.environ.get("DLQ_TOPIC_NAME", "apolo-preavaluo-dlq")
@@ -85,12 +85,9 @@ def _normalize_prefix(prefix: Any) -> str:
 
 
 def _make_folio_id(bucket: str, folder_prefix: str) -> str:
-    """Genera folio_id a partir del bucket y folder_prefix."""
-    if folder_prefix:
-        # Usar el primer segmento del folder_prefix como ID
-        parts = folder_prefix.strip("/").split("/")
-        return parts[0] if parts else f"FOLIO-{uuid.uuid4().hex[:8]}"
-    return f"FOLIO-{uuid.uuid4().hex[:8]}"
+    """Genera folio_id determinístico a partir del bucket y folder_prefix para unicidad global."""
+    combined = f"{bucket}:{folder_prefix}"
+    return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
 
 def _make_doc_id(folio_id: str, file_id: str, generation: Optional[str] = None) -> str:
@@ -111,31 +108,6 @@ def _exponential_backoff_delay(attempt: int) -> float:
 def _json_log(payload: Dict[str, Any]) -> None:
     """Logging estructurado en JSON para Cloud Logging."""
     logging.info(json.dumps(payload, ensure_ascii=False))
-
-
-def _parse_eventarc_event(request: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Parse Eventarc CloudEvent para extraer detalles del evento de GCS.
-    
-    Returns:
-        (bucket_name, object_name, event_id) o (None, None, None)
-    """
-    try:
-        event_data = request.get_json()
-        if not event_data:
-            return None, None, None
-            
-        event_id = event_data.get("id", "")
-        data = event_data.get("data", {})
-        bucket_name = data.get("bucket", "")
-        object_name = data.get("name", "")
-        
-        if not bucket_name or not object_name:
-            return None, None, None
-            
-        return bucket_name, object_name, event_id
-    except Exception as e:
-        logger.error(f"Error parsing Eventarc event: {e}")
-        return None, None, None
 
 
 def _is_ready_sentinel(object_name: str) -> Tuple[bool, str]:
@@ -384,8 +356,12 @@ def _get_firestore_client() -> firestore.Client:
     return firestore.Client(database=FIRESTORE_DATABASE)
 
 
-def _ensure_folio_document(db: firestore.Client, folio_id: str, bucket: str, folder_prefix: str) -> None:
-    """Crea o actualiza documento de folio en Firestore."""
+def _ensure_folio_document(db: firestore.Client, folio_id: str, bucket: str, folder_prefix: str) -> bool:
+    """Crea o actualiza documento de folio en Firestore.
+    
+    Returns:
+        True si debe procesar, False si ya está completo.
+    """
     try:
         folio_ref = db.collection("folios").document(folio_id)
         folio_doc = folio_ref.get()
@@ -400,14 +376,23 @@ def _ensure_folio_document(db: firestore.Client, folio_id: str, bucket: str, fol
                 "created_at": firestore.SERVER_TIMESTAMP,
                 "started_at": firestore.SERVER_TIMESTAMP,
             })
+            return True
         else:
+            data = folio_doc.to_dict()
+            status = data.get("status")
+            if status in ["DONE", "DONE_WITH_ERRORS"]:
+                logger.info(f"Folio {folio_id} already completed with status {status}, ignoring re-processing")
+                return False
+            # Si está PROCESSING o ERROR, re-procesar
             folio_ref.update({
                 "status": "PROCESSING",
                 "started_at": firestore.SERVER_TIMESTAMP,
                 "last_update_at": firestore.SERVER_TIMESTAMP,
             })
+            return True
     except Exception as e:
         logger.error(f"Error creating folio document: {e}")
+        return True  # Por defecto, procesar
 
 
 def _check_document_processed(db: firestore.Client, folio_id: str, doc_id: str) -> Tuple[bool, Optional[Dict]]:
@@ -494,6 +479,15 @@ def _process_single_document(folio_id: str, file_name: str, generation: str, buc
         already_processed, cached = _check_document_processed(db, folio_id, doc_id)
         if already_processed:
             logger.info(f"Document already processed (from cache): {file_id}")
+            _json_log({
+                "event_type": f"folio_{folio_id}_doc_{doc_id}_already_processed",
+                "folio_id": folio_id,
+                "doc_id": doc_id,
+                "gcs_uri": gcs_uri,
+                "generation": generation,
+                "doc_type": cached.get("doc_type", "UNKNOWN"),
+                "timestamp": _utc_iso(),
+            })
             return {
                 "file_name": file_name,
                 "gcs_uri": gcs_uri,
@@ -501,6 +495,25 @@ def _process_single_document(folio_id: str, file_name: str, generation: str, buc
                 "from_cache": True,
                 "doc_type": cached.get("doc_type", "UNKNOWN"),
             }
+        
+        # Marcar como IN_PROGRESS
+        doc_ref = db.collection("folios").document(folio_id).collection("documentos").document(doc_id)
+        doc_ref.set({
+            "gcs_uri": gcs_uri,
+            "generation": generation,
+            "file_id": file_id,
+            "status": "IN_PROGRESS",
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        
+        _json_log({
+            "event_type": f"folio_{folio_id}_doc_{doc_id}_processing_start",
+            "folio_id": folio_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "generation": generation,
+            "timestamp": _utc_iso(),
+        })
         
         # Validar PDF
         storage_client = storage.Client()
@@ -514,18 +527,59 @@ def _process_single_document(folio_id: str, file_name: str, generation: str, buc
             )
         
         # Clasificar
+        _json_log({
+            "event_type": f"folio_{folio_id}_doc_{doc_id}_classification_start",
+            "folio_id": folio_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "timestamp": _utc_iso(),
+        })
         logger.info(f"Classifying: {file_id}")
         classification = classify_document(gcs_uri)
+        _json_log({
+            "event_type": f"folio_{folio_id}_doc_{doc_id}_classification_done",
+            "folio_id": folio_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "doc_type": classification["document_type"],
+            "confidence": classification["confidence"],
+            "timestamp": _utc_iso(),
+        })
         
         # Extraer
+        _json_log({
+            "event_type": f"folio_{folio_id}_doc_{doc_id}_extraction_start",
+            "folio_id": folio_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "doc_type": classification["document_type"],
+            "timestamp": _utc_iso(),
+        })
         logger.info(f"Extracting: {file_id}")
         extraction = extract_document_data(gcs_uri, classification["document_type"])
+        _json_log({
+            "event_type": f"folio_{folio_id}_doc_{doc_id}_extraction_done",
+            "folio_id": folio_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "doc_type": classification["document_type"],
+            "timestamp": _utc_iso(),
+        })
         
         # Persistir
         _persist_document_result(
             db, folio_id, doc_id, file_id, gcs_uri, generation,
             classification, extraction, "DONE"
         )
+        
+        _json_log({
+            "event_type": f"folio_{folio_id}_doc_{doc_id}_processing_done",
+            "folio_id": folio_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "doc_type": classification["document_type"],
+            "timestamp": _utc_iso(),
+        })
         
         return {
             "file_name": file_name,
@@ -549,6 +603,16 @@ def _process_single_document(folio_id: str, file_name: str, generation: str, buc
         
         # Publicar a DLQ
         _publish_to_dlq(folio_id, gcs_uri, "PROCESSING_ERROR", str(e), MAX_RETRIES)
+        
+        _json_log({
+            "event_type": f"folio_{folio_id}_doc_{doc_id}_error",
+            "folio_id": folio_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "error_type": "PROCESSING_ERROR",
+            "error_message": str(e),
+            "timestamp": _utc_iso(),
+        })
         
         return {
             "file_name": file_name,
@@ -621,7 +685,9 @@ def process_folder_on_ready(cloud_event):
         
         # Inicializar Firestore
         db = _get_firestore_client()
-        _ensure_folio_document(db, folio_id, bucket_name, folder_prefix)
+        should_process = _ensure_folio_document(db, folio_id, bucket_name, folder_prefix)
+        if not should_process:
+            return "OK - Already processed", 200
         
         # Log structured de inicio
         _json_log({

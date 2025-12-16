@@ -36,12 +36,15 @@ To generate diagram images, you have two options:
    - Open any `.mmd` file
    - Press `Ctrl+Shift+V` or right-click and select "Open Preview"
 
-### Option 3: Use Online Viewer (Immediate, No Installation)
+### Option 4: Use Python Script (No Node.js Required)
 
-1. Open https://mermaid.live/
-2. Copy the content from any `.mmd` file
-3. Paste into the editor
-4. Export as PNG/SVG from the website
+1. **Ensure Python is installed** (comes with most systems)
+2. **Run the generation script**
+   ```powershell
+   cd diagrams
+   python generate_diagrams.py
+   ```
+   This will generate PNG images for all `.mmd` files using online APIs.
 
 ## Quick Start (No Installation)
 

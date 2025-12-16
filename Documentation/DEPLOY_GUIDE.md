@@ -49,8 +49,12 @@ gcloud projects list
 $PROJECT_ID = "TU_PROJECT_ID"
 gcloud config set project $PROJECT_ID
 
+# Configurar región por defecto
+gcloud config set run/region us-south1
+
 # Verificar configuración
 gcloud config get-value project
+gcloud config get-value run/region
 ```
 
 ## 🔑 Paso 4: Habilitar APIs Necesarias

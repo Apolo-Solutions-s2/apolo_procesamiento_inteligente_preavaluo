@@ -1,32 +1,38 @@
 flowchart LR
 
-    WF["Cloud Workflows<br/>invoke Job(runId, folderPrefix)"]
+    EVENT["Eventarc<br/>object.finalize<br/>'is_ready' file"]
 
-    CR["Cloud Run Job<br/>Procesamiento Inteligente"]
+    CR["Cloud Run Service<br/>Procesamiento Inteligente"]
 
     GCS["Cloud Storage<br/>PDF/A Files"]
 
-    CLASS["Document AI Classifier"]
-    EXTR["Document AI Extractor"]
+    CLASS["Document AI Classifier<br/>(us-south1)"]
+    EXTR["Document AI Extractor<br/>(us-south1)"]
 
-    FS_runs["Firestore<br/>runs/{runId}"]
-    FS_docs["Firestore<br/>runs/{runId}/documents/{docId}"]
+    FS_folios["Firestore<br/>folios/{folioId}"]
+    FS_docs["Firestore<br/>folios/{folioId}/documentos/{docId}"]
+    FS_extr["Firestore<br/>folios/{folioId}/documentos/{docId}/extracciones/{extractionId}"]
 
     DLQ["Pub/Sub DLQ"]
 
+    LOGS["Cloud Logging<br/>structured logs"]
+
     %% Flow
-    WF --> CR
+    EVENT --> CR
 
-    CR -->|list folder| GCS
-    CR -->|load PDF| GCS
+    CR -->|list PDFs in folder| GCS
+    CR -->|download PDF| GCS
 
-    CR -->|classify| CLASS
-    CR -->|extract| EXTR
+    CR -->|classify document| CLASS
+    CR -->|extract data| EXTR
 
-    CR -->|write run metadata| FS_runs
+    CR -->|write folio metadata| FS_folios
     CR -->|write doc results| FS_docs
+    CR -->|write extraction data| FS_extr
 
-    CR -->|on failure > threshold| DLQ
+    CR -->|structured logs| LOGS
+
+    CR -->|on persistent failure| DLQ
 
     CLASS --> CR
     EXTR --> CR

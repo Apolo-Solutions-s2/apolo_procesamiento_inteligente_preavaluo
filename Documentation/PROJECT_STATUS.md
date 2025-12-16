@@ -11,11 +11,11 @@
 | **Extracción de Campos** | ✅ Simulado | Listo para Document AI |
 | **Validación de PDFs** | ✅ Funcional | Lee magic bytes %PDF- |
 | **Manejo de Errores** | ✅ Funcional | HTTP 500 con códigos específicos |
-| **Logs Estructurados** | ✅ Funcional | JSON con correlación por run_id |
+| **Logs Estructurados** | ✅ Funcional | JSON con event_type específico por documento y carpeta |
 | **Cloud Run Ready** | ✅ Funcional | Dockerfile optimizado |
 | **Scripts de Despliegue** | ✅ Funcional | Bash y PowerShell |
 | **Scripts de Prueba** | ✅ Funcional | test-cloudrun.ps1/.sh |
-| **Idempotencia** | ⚠️ Preparado | Código listo, no integrado aún |
+| **Idempotencia** | ✅ Funcional | Implementada por generation GCS y estado de carpeta |
 | **Cloud Workflows** | ⏳ Pendiente | workflow.yaml listo para deploy |
 
 ## 📂 Archivos del Proyecto

@@ -1,53 +1,125 @@
 # Apolo Procesamiento Inteligente - Preavalúo
 
-> **⚡ Actualización de Scripts (Dic 2025)**: Los scripts de despliegue han sido simplificados y optimizados para Google Cloud Shell. Ver [scripts/README.md](scripts/README.md) para la guía actualizada.
+Microservicio serverless para procesamiento inteligente de documentos financieros PDF/A en Google Cloud Platform.
 
-## Terraform Infrastructure as Code
+## 📋 Descripción
 
-Infrastructure automation for Apolo document processing service on Google Cloud Platform.
+Este microservicio pertenece al módulo de preavalúos Apolo y ejecuta el procesamiento inteligente por carpeta de documentos financieros previamente estandarizados a PDF/A. Se activa automáticamente cuando se detecta un archivo bandera `is_ready` en Cloud Storage, procesando todos los PDFs en paralelo usando Document AI para clasificación y extracción estructurada.
+
+### ✨ Características Principales
+- **Activación automática**: Trigger por Eventarc en eventos de GCS
+- **Procesamiento paralelo**: Múltiples documentos simultáneamente
+- **Idempotencia completa**: Por generación de GCS y estado de carpeta
+- **Persistencia trazable**: Esquema jerárquico en Firestore
+- **Manejo de errores**: Reintentos con backoff y DLQ
+- **Observabilidad**: Logs estructurados en Cloud Logging
+
+## 🏗️ Arquitectura
+
+- **Runtime**: Python 3.11 en Cloud Run
+- **Región**: us-south1
+- **Trigger**: Eventarc (GCS object.finalize)
+- **Procesamiento**: Document AI Classifier + Extractor
+- **Almacenamiento**: Firestore (folios/documentos/extracciones)
+- **Mensajería**: Pub/Sub DLQ para errores
 
 ## 🚀 Inicio Rápido
 
-Para desplegar la aplicación completa desde Google Cloud Shell:
+### Opción 1: Despliegue Automatizado (Recomendado)
 
 ```bash
-# 1. Configuración inicial (primera vez)
+# Desde Google Cloud Shell
 cd scripts
 ./setup.sh TU_PROJECT_ID
-
-# 2. Despliegue completo
 ./deploy.sh dev TU_PROJECT_ID
 ```
 
-Ver documentación completa en [scripts/README.md](scripts/README.md)
+### Opción 2: Desarrollo Local con Docker
 
----
+```bash
+# Construir imagen
+docker build -t apolo-processor .
 
-## Overview
+# Ejecutar localmente
+docker-compose up
+```
 
-This Terraform configuration deploys a complete serverless document processing infrastructure including Cloud Run service, Cloud Storage, Firestore database, Document AI processors, and Eventarc triggers for automated processing.
-
-## Project Structure
+## 📁 Estructura del Proyecto
 
 ```
 apolo_procesamiento_inteligente_preavaluo/
-├── scripts/
-│   ├── setup.sh              # Configuración inicial GCP
-│   ├── deploy.sh             # Despliegue completo automatizado
-│   ├── cleanup.sh            # Limpieza de archivos obsoletos
-│   └── README.md             # Guía de scripts (actualizada)
-├── infrastructure/
+├── apolo_procesamiento_inteligente.py    # Código principal
+├── requirements.txt                      # Dependencias Python
+├── runtime.txt                          # Versión Python
+├── Dockerfile                            # Imagen Cloud Run
+├── docker-compose.yml                    # Desarrollo local
+├── pyrightconfig.json                    # Configuración Pylance
+├── scripts/                              # Scripts de despliegue
+│   ├── setup.sh                         # Configuración GCP
+│   ├── deploy.sh                        # Despliegue automatizado
+│   ├── README.md                        # Guía de scripts
+│   └── ...
+├── infrastructure/                       # IaC con Terraform
 │   └── terraform/
-│       ├── main.tf           # Core infrastructure resources
-│       ├── variables.tf      # Variable definitions
-│       ├── outputs.tf        # Output values
-│       ├── providers.tf      # GCP provider configuration
-│       └── env/
-│           ├── dev.tfvars    # Development environment
-│           ├── qa.tfvars     # QA environment
-│           └── prod.tfvars   # Production environment
-├── apolo_procesamiento_inteligente.py  # Aplicación principal
-├── Dockerfile                # Container configuration
+│       ├── main.tf                      # Recursos principales
+│       ├── variables.tf                 # Variables
+│       └── env/                         # Config por ambiente
+├── Documentation/                        # Documentación completa
+│   ├── README.md                        # Índice de docs
+│   ├── ARCHITECTURE.md                  # Arquitectura detallada
+│   ├── DEPLOY_GUIDE.md                  # Guía de despliegue
+│   ├── FIRESTORE_SCHEMA.md              # Esquema base de datos
+│   └── ...
+├── diagrams/                            # Diagramas Mermaid
+│   ├── architecture-dataflow.mmd        # Flujo de arquitectura
+│   ├── firestore-schema.mmd             # Esquema Firestore
+│   └── ...
+└── README.md                            # Este archivo
+```
+
+## 📚 Documentación
+
+- **[Inicio Rápido](Documentation/QUICKSTART.md)**: Configuración y despliegue paso a paso
+- **[Arquitectura](Documentation/ARCHITECTURE.md)**: Diseño del sistema y componentes
+- **[Esquema Firestore](Documentation/FIRESTORE_SCHEMA.md)**: Estructura de datos
+- **[Guía de Despliegue](Documentation/DEPLOY_GUIDE.md)**: Deployment detallado
+- **[Scripts](scripts/README.md)**: Uso de scripts de automatización
+- **[Diagramas](diagrams/README.md)**: Visualizaciones del sistema
+
+## 🔧 Requisitos
+
+- **Python**: 3.11
+- **GCP**: Proyecto con billing habilitado
+- **APIs**: Cloud Run, Document AI, Firestore, Cloud Storage, Eventarc, Pub/Sub
+- **Herramientas**: Docker, gcloud CLI (opcional para desarrollo local)
+
+## 🏷️ Estado del Proyecto
+
+| Componente | Estado | Notas |
+|------------|--------|-------|
+| **Código Python** | ✅ Completo | Idempotencia, logs específicos, procesamiento paralelo |
+| **Docker** | ✅ Completo | Imagen optimizada para Cloud Run |
+| **Terraform** | ✅ Completo | Infraestructura en us-south1 |
+| **Scripts** | ✅ Completo | Automatización para Cloud Shell |
+| **Documentación** | ✅ Completo | Actualizada con cambios recientes |
+| **Diagramas** | ✅ Completo | Esquemas actualizados |
+| **Pruebas** | ⚠️ Pendiente | Scripts de test disponibles |
+
+## 🤝 Contribución
+
+1. Revisar [Documentación](Documentation/) para entender la arquitectura
+2. Seguir [Guía de Despliegue](Documentation/DEPLOY_GUIDE.md) para desarrollo
+3. Usar scripts en `scripts/` para despliegue consistente
+
+## 📄 Licencia
+
+Este proyecto es parte del sistema Apolo de procesamiento de preavalúos.
+
+---
+
+**Última actualización**: Diciembre 2025  
+**Versión**: 2.0.0  
+**Región**: us-south1
 └── requirements.txt          # Python dependencies
 ```
 

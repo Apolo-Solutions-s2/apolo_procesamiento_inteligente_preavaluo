@@ -1,31 +1,48 @@
 sequenceDiagram
     autonumber
 
-    participant WF as Cloud Workflow
-    participant CR as Cloud Run Job
+    participant EVENT as Eventarc
+    participant CR as Cloud Run Service
     participant GCS as Cloud Storage
     participant CL as Document AI Classifier
     participant EX as Document AI Extractor
     participant FS as Firestore
+    participant LOG as Cloud Logging
+    participant DLQ as Pub/Sub DLQ
 
-    WF->>CR: invoke(runId, folderPrefix)
-    CR->>FS: create runs/{runId} (status=processing)
+    EVENT->>CR: object.finalize event ('is_ready' file)
+    CR->>FS: create folios/{folioId} (status=PROCESSING)
 
-    CR->>GCS: list PDFs in folderPrefix
-    loop per file
-        CR->>FS: upsert documents/{docId} (status=processing)
+    CR->>LOG: folder_processing_start
+
+    CR->>GCS: list PDFs in folder_prefix
+    loop per document (parallel)
+        CR->>FS: upsert documentos/{docId} (status=IN_PROGRESS)
+
+        CR->>LOG: folio_{folioId}_doc_{docId}_processing_start
 
         CR->>GCS: download PDF
 
+        CR->>LOG: folio_{folioId}_doc_{docId}_classification_start
         CR->>CL: classify PDF
         CL-->>CR: classification result
+        CR->>LOG: folio_{folioId}_doc_{docId}_classification_done
 
+        CR->>LOG: folio_{folioId}_doc_{docId}_extraction_start
         CR->>EX: extract structured fields
         EX-->>CR: extraction blocks + anchors
+        CR->>LOG: folio_{folioId}_doc_{docId}_extraction_done
 
-        CR->>FS: update documents/{docId} (completed)
-        CR->>FS: increment counters in runs/{runId}
+        CR->>FS: update documentos/{docId} (status=DONE)
+        CR->>FS: create extracciones/{extractionId}
+        CR->>FS: increment processed_docs in folios/{folioId}
+
+        CR->>LOG: folio_{folioId}_doc_{docId}_processing_done
     end
 
-    CR->>FS: update runs/{runId} (status=completed)
-    CR-->>WF: return processing summary
+    alt if errors > threshold
+        CR->>DLQ: publish failed documents
+    end
+
+    CR->>FS: update folios/{folioId} (status=DONE or DONE_WITH_ERRORS)
+    CR->>LOG: folder_processing_complete

@@ -1,53 +1,65 @@
-# 📊 Estructura Firestore para Document AI
+# 📊 Estructura Firestore para Apolo Procesamiento Inteligente
 
 ## Visión General
 
-El sistema ahora implementa una estructura jerárquica en Firestore que replica el patrón de **corrimientos (runs)** para organizar los resultados del procesamiento de Document AI.
+El sistema implementa una estructura jerárquica en Firestore organizada por **folios** (carpetas de procesamiento), siguiendo el patrón descrito en la especificación del microservicio.
 
 ---
 
 ## 🗂️ Estructura de Colecciones
 
 ```
-firestore (database: apolo-preavaluos-dev)
+firestore (database: (default))
 │
-└── runs/
-    ├── {runId}/                          # UUID del corrimiento
-    │   ├── runId: string
-    │   ├── preavaluo_id: string
-    │   ├── sourceBucket: string          # gs://bucket-name
-    │   ├── folderPrefix: string
-    │   ├── status: string                # processing | completed | partial_failure | failed
-    │   ├── documentCount: number         # Total de documentos procesados
-    │   ├── processedCount: number        # Documentos exitosos
-    │   ├── failedCount: number           # Documentos fallidos
-    │   ├── createdAt: timestamp
-    │   └── updatedAt: timestamp
+└── folios/
+    ├── {folioId}/                         # Hash SHA-256(bucket:folder_prefix)
+    │   ├── bucket: string                 # Nombre del bucket GCS
+    │   ├── folder_prefix: string          # Prefijo de la carpeta procesada
+    │   ├── status: string                 # PROCESSING | DONE | DONE_WITH_ERRORS | ERROR
+    │   ├── total_docs: number             # Total de documentos en la carpeta
+    │   ├── processed_docs: number         # Documentos procesados
+    │   ├── created_at: timestamp
+    │   ├── started_at: timestamp
+    │   ├── finished_at: timestamp
+    │   └── last_update_at: timestamp
     │
-    └── documents/                        # Subcolección
-        └── {docId}/                      # Hash SHA-256(folioId:fileId)
-            ├── docId: string
-            ├── runId: string
-            ├── folioId: string
-            ├── fileId: string
-            ├── gcsUri: string            # gs://bucket/path/file.pdf
-            ├── status: string            # processing | completed | failed
+    └── documentos/                        # Subcolección
+        └── {docId}/                       # Hash SHA-256(folioId:fileId:generation)
+            ├── gcs_uri: string            # gs://bucket/path/file.pdf
+            ├── generation: string         # Generación GCS para idempotencia
+            ├── file_id: string            # Nombre del archivo
+            ├── status: string             # DONE | ERROR
+            ├── doc_type: string           # ESTADO_RESULTADOS | ESTADO_SITUACION_FINANCIERA | ESTADO_FLUJOS_EFECTIVO | UNKNOWN
+            ├── classifier_confidence: number # 0.0 - 1.0
+            ├── classifier_version: string
+            ├── updated_at: timestamp
+            ├── completed_at: timestamp    # Solo si DONE
+            ├── error_type: string         # Solo si ERROR
+            ├── error_message: string      # Solo si ERROR
             │
-            ├── classification: {         # Resultado del Clasificador Document AI
-            │   ├── documentType: string  # ESTADO_RESULTADOS | ESTADO_SITUACION_FINANCIERA | ESTADO_FLUJOS_EFECTIVO
-            │   ├── confidence: number    # 0.0 - 1.0
-            │   └── classifierVersion: string
-            │   }
-            │
-            ├── extraction: {             # Resultado del Extractor Document AI
-            │   ├── fields: {             # Campos estructurados por tipo de documento
-            │   │   ├── ORG_NAME: string
-            │   │   ├── REPORTING_PERIOD: string
-            │   │   ├── CURRENCY: string
-            │   │   ├── UNITS_SCALE: string
-            │   │   ├── STATEMENT_TITLE: string
-            │   │   └── line_items: [     # Array de líneas del documento
-            │   │       {
+            └── extracciones/              # Subcolección
+                └── {extractionId}/        # extraction-{timestamp}
+                    ├── fields: {          # Campos extraídos estructurados
+                    │   ├── ORG_NAME: {value, confidence, page_refs}
+                    │   ├── REPORTING_PERIOD: {value, confidence, page_refs}
+                    │   ├── CURRENCY: {value, confidence, page_refs}
+                    │   ├── UNITS_SCALE: {value, confidence, page_refs}
+                    │   ├── STATEMENT_TITLE: {value, confidence, page_refs}
+                    │   └── line_items: [   # Array de líneas del documento
+                    │       {
+                    │       ├── type: string # LINE_ITEM_NAME | LINE_ITEM_VALUE | etc.
+                    │       ├── value: string
+                    │       ├── confidence: number
+                    │       └── page_refs: [{page, bounding_box}]
+                    │       }
+                    │   ]
+                    │   }
+                    ├── metadata: {
+                    │   ├── page_count: number
+                    │   ├── processor_version: string
+                    │   └── extraction_schema_version: string
+                    │   }
+                    └── created_at: timestamp
             │   │         LINE_ITEM_NAME: string
             │   │         LINE_ITEM_VALUE: number
             │   │         COLUMN_YEAR: string

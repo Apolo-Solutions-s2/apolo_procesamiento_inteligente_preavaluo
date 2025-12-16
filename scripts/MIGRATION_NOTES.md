@@ -1,3 +1,41 @@
+# Guía de Migración - Apolo Procesamiento Inteligente
+
+## 🆕 Cambios Recientes (Diciembre 2025)
+
+### 🔄 Actualizaciones de Configuración
+
+#### Región GCP
+- **Antes**: Región por defecto `us`
+- **Ahora**: Región por defecto `us-south1`
+- **Impacto**: Todos los servicios GCP ahora apuntan a `us-south1`
+- **Acción**: Actualizar variables de entorno si usas región diferente
+
+#### Requirements
+- **Antes**: Versiones genéricas (`>=`)
+- **Ahora**: Versiones específicas y actualizadas
+- **Beneficio**: Mayor estabilidad y seguridad
+- **Acción**: `pip install -r requirements.txt` para actualizar
+
+#### Logs Estructurados
+- **Antes**: `event_type` genérico (`doc_processing_start`)
+- **Ahora**: `event_type` específico (`folio_{folio_id}_doc_{doc_id}_processing_start`)
+- **Beneficio**: Mejor trazabilidad en procesamiento paralelo
+- **Acción**: Actualizar queries de logs si las tienes automatizadas
+
+#### Esquema Firestore
+- **Antes**: Esquema basado en `runs/`
+- **Ahora**: Esquema jerárquico `folios/{folioId}/documentos/{docId}/extracciones/{extractionId}`
+- **Beneficio**: Alineado con especificación del microservicio
+- **Acción**: Migrar datos existentes si aplica (ver documentación)
+
+#### Idempotencia
+- **Antes**: No implementada completamente
+- **Ahora**: Completa por `generation` y estado de carpeta
+- **Beneficio**: Evita re-procesamiento innecesario
+- **Acción**: Ninguna, es automática
+
+---
+
 # Guía de Migración - Scripts Simplificados
 
 ## 🔄 Cambios Realizados

@@ -1,28 +1,19 @@
 flowchart TD
-    subgraph Runs["Collection: runs"]
-        R["runs/{runId}"]
-        R_fields["Fields:<br/>• preavaluo_id<br/>• sourceBucket<br/>• folderPrefix<br/>• status<br/>• documentCount<br/>• processedCount<br/>• failedCount<br/>• createdAt<br/>• updatedAt"]
+    subgraph Folios["Collection: folios"]
+        F["folios/{folioId}"]
+        F_fields["Fields:<br/>• bucket<br/>• folder_prefix<br/>• status<br/>• total_docs<br/>• processed_docs<br/>• created_at<br/>• started_at<br/>• finished_at<br/>• last_update_at"]
     end
 
-    subgraph Docs["Subcollection: documents"]
-        D["documents/{docId}"]
-        D_fields["Fields:<br/>• docId<br/>• runId<br/>• folioId<br/>• fileId<br/>• gcsUri<br/>• status<br/>• processingStartedAt<br/>• processedAt<br/>• createdAt<br/>• updatedAt"]
+    subgraph Docs["Subcollection: documentos"]
+        D["documentos/{docId}"]
+        D_fields["Fields:<br/>• docId<br/>• folioId<br/>• fileId<br/>• gcsUri<br/>• generation<br/>• status<br/>• doc_type<br/>• classifier_confidence<br/>• classifier_version<br/>• updated_at<br/>• completed_at<br/>• error_type (opcional)<br/>• error_message (opcional)"]
     end
 
-    subgraph Classification["Classification Object"]
-        C_fields["• documentType<br/>• confidence<br/>• classifierVersion"]
-    end
-
-    subgraph Extraction["Extraction Object"]
+    subgraph Extracciones["Subcollection: extracciones"]
+        E["extracciones/{extractionId}"]
         E_fields["Fields:<br/>• ORG_NAME<br/>• REPORTING_PERIOD<br/>• CURRENCY<br/>• UNITS_SCALE<br/>• STATEMENT_TITLE<br/>• line_items[]"]
-        E_meta["Metadata:<br/>• page_count<br/>• processor_version<br/>• extraction_schema_version<br/>• mime_type<br/>• decision_path<br/>• table_references[]"]
+        E_meta["Metadata:<br/>• page_count<br/>• processor_version<br/>• extraction_schema_version"]
     end
 
-    subgraph Error["Error Object (optional)"]
-        Err_fields["• code<br/>• message"]
-    end
-
-    R --> D
-    D --> Classification
-    D --> Extraction
-    D -.optional.-> Error
+    F --> D
+    D --> Extracciones

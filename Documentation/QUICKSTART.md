@@ -66,8 +66,12 @@ $PROJECT_ID = "tu-project-id-aqui"
 # Configurar como proyecto activo
 gcloud config set project $PROJECT_ID
 
+# Configurar región por defecto
+gcloud config set run/region us-south1
+
 # Verificar
 gcloud config get-value project
+gcloud config get-value run/region
 ```
 
 ---
@@ -78,7 +82,7 @@ gcloud config get-value project
 
 ```powershell
 # Navegar al directorio del proyecto
-cd "c:\Users\LD_51\Desktop\job\Sarah\apolo_procesamiento_inteligente_preavaluo"
+cd "ruta\a\tu\proyecto\apolo_procesamiento_inteligente_preavaluo"
 
 # Ejecutar script de despliegue
 .\deploy-complete.ps1
