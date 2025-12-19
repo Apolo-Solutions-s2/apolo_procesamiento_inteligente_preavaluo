@@ -2,6 +2,23 @@
 
 This folder contains deployment and testing scripts for the Apolo Document Processing Service to be run in Google Cloud Shell.
 
+## � Activación del Servicio
+
+El servicio **apolo-procesamiento-inteligente** se activa automáticamente cuando subes un archivo llamado **IS_READY** (sin extensión) a cualquier carpeta del bucket `apolo-preavaluos-pdf-dev`.
+
+### Flujo:
+```
+1. Sube archivos PDF → gs://apolo-preavaluos-pdf-dev/MI-CARPETA/doc1.pdf
+2. Sube archivo IS_READY → gs://apolo-preavaluos-pdf-dev/MI-CARPETA/IS_READY
+3. Eventarc detecta automáticamente y activa el trigger
+4. Microservicio procesa TODOS los PDFs de la carpeta
+5. Archivo IS_READY se excluye automáticamente (está vacío)
+```
+
+**Nota**: La detección de "IS_READY" es **case-insensitive** (funciona con mayúsculas y minúsculas)
+
+---
+
 ## 📁 Available Scripts
 
 ### 🚀 deploy.sh
@@ -15,7 +32,7 @@ This folder contains deployment and testing scripts for the Apolo Document Proce
 # Resume interrupted deployment
 ./deploy.sh --resume
 
-# Skip tests
+# Skip tests (for code updates)
 ./deploy.sh --skip-tests
 
 # Show help
@@ -24,12 +41,35 @@ This folder contains deployment and testing scripts for the Apolo Document Proce
 
 **Features:**
 - Enables required GCP APIs
-- Creates service account with proper IAM roles
-- Sets up Cloud Storage bucket
-- Configures Eventarc trigger for GCS
+- Creates service account with proper IAM roles and Eventarc permissions
+- Sets up Cloud Storage bucket with versioning
+- Configures Eventarc trigger for GCS finalization events
 - Deploys Cloud Run service with all environment variables
-- Runs automated tests
+- Runs automated tests (unless --skip-tests)
 - Provides comprehensive summary and usage instructions
+
+---
+
+### ⚡ update_code.sh
+**Code update script** - Fast deployment of code changes (NEW!)
+
+**Usage:**
+```bash
+# Update code from GitHub and redeploy
+./update_code.sh
+
+# Show help
+./update_code.sh --help
+```
+
+**Features:**
+- Fetches latest code from GitHub (branch main)
+- Discards local Cloud Shell changes
+- Redeployes Cloud Run service automatically
+- **Skips tests by default** (faster updates)
+- Ideal for iterative development
+
+**This is the recommended way to update after code changes!**
 
 ---
 
@@ -38,7 +78,7 @@ This folder contains deployment and testing scripts for the Apolo Document Proce
 
 **Usage:**
 ```bash
-# Basic test
+# Basic test (creates UUID folder, processes PDFs)
 ./test_uuid_processing.sh
 
 # Test with automatic cleanup
@@ -53,12 +93,12 @@ This folder contains deployment and testing scripts for the Apolo Document Proce
 
 **What it tests:**
 - ✓ UUID folder structure preservation
-- ✓ Multiple file uploads without is_ready (should not trigger)
-- ✓ is_ready marker upload (triggers processing)
-- ✓ PDF processing of supported formats
-- ✓ Correct handling of unsupported formats
+- ✓ Multiple PDF uploads
+- ✓ IS_READY marker upload (triggers processing) - case-insensitive
+- ✓ PDF validation and processing
+- ✓ Correct handling of file types
 - ✓ Log entries with folder_uuid context
-- ✓ Output folder creation in correct UUID structure
+- ✓ Output folder creation in correct structure
 
 ---
 
@@ -107,13 +147,14 @@ chmod +x *.sh
 ./deploy.sh
 ```
 
-### After Making Code Changes (RECOMMENDED)
+### After Making Code Changes (RECOMMENDED - FASTER)
 ```bash
-# Just run the update script - it handles everything!
+# Just run the update script - it pulls latest code and redeploys!
 cd ~/apolo_procesamiento_inteligente_preavaluo/Cloud\ Shell
 chmod +x update_code.sh
 ./update_code.sh
 ```
+This handles everything: git pull, code update, and deployment (no tests by default)
 
 ### After Making Code Changes (Manual Method)
 ```bash
@@ -127,7 +168,7 @@ git reset --hard origin/main
 # Set permissions and deploy
 cd "Cloud Shell"
 chmod +x *.sh
-./deploy.sh --resume
+./deploy.sh --resume --skip-tests
 ```
 
 ### Run Tests

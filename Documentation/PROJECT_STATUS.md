@@ -1,22 +1,25 @@
 # 📊 Estado del Proyecto - Apolo Procesamiento Inteligente
 
-## ✅ Estado Actual: LISTO PARA PRUEBAS
+## ✅ Estado Actual: ACTIVO Y FUNCIONANDO
 
 ### 🎯 Capacidades Implementadas
 
 | Característica | Estado | Notas |
 |---------------|--------|-------|
-| **Procesamiento de PDFs** | ✅ Funcional | Validación por magic bytes |
-| **Clasificación de Documentos** | ✅ Simulado | Listo para Document AI |
-| **Extracción de Campos** | ✅ Simulado | Listo para Document AI |
-| **Validación de PDFs** | ✅ Funcional | Lee magic bytes %PDF- |
-| **Manejo de Errores** | ✅ Funcional | HTTP 500 con códigos específicos |
-| **Logs Estructurados** | ✅ Funcional | JSON con event_type específico por documento y carpeta |
-| **Cloud Run Ready** | ✅ Funcional | Dockerfile optimizado |
-| **Scripts de Despliegue** | ✅ Funcional | Bash y PowerShell |
-| **Scripts de Prueba** | ✅ Funcional | test-cloudrun.ps1/.sh |
-| **Idempotencia** | ✅ Funcional | Implementada por generation GCS y estado de carpeta |
-| **Cloud Workflows** | ⏳ Pendiente | workflow.yaml listo para deploy |
+| **Activación por IS_READY** | ✅ Funcional | Detección case-insensitive, Eventarc trigger |
+| **Listado de PDFs** | ✅ Funcional | Excluye archivo IS_READY automáticamente |
+| **Procesamiento Paralelo** | ✅ Funcional | ThreadPoolExecutor con max 8 concurrentes |
+| **Validación de PDFs** | ✅ Funcional | Verificación de magic bytes %PDF- |
+| **Clasificación de Documentos** | ✅ Simulado | Listo para Document AI real |
+| **Extracción de Campos** | ✅ Simulado | Listo para Document AI real |
+| **Persistencia Firestore** | ✅ Código listo | Requiere inicializar Firestore en GCP |
+| **Manejo de Errores** | ✅ Funcional | Reintentos con backoff exponencial, DLQ |
+| **Logs Estructurados** | ✅ Funcional | JSON con event_type, traceabilidad completa |
+| **Cloud Run Deployment** | ✅ Funcional | v00014-vvc validado exitosamente |
+| **Scripts de Despliegue** | ✅ Funcional | `deploy.sh` y `update_code.sh` optimizados |
+| **Scripts de Prueba** | ✅ Funcional | `test_uuid_processing.sh` automatizado |
+| **Idempotencia** | ✅ Funcional | Por generation GCS y estado de carpeta |
+| **Documentación** | ✅ Actualizada | Incluye cambios 2025-12-19 |
 
 ## 📂 Archivos del Proyecto
 
@@ -64,36 +67,43 @@
 
 ## 🚀 Próximos Pasos Recomendados
 
-### Fase 1: Validación Básica (ACTUAL) ✅
-- [x] Código funcional
-- [x] Docker configurado
-- [x] Scripts de despliegue
-- [x] Scripts de prueba
-- [ ] **Desplegar a Cloud Run dev**
-- [ ] **Ejecutar suite de pruebas**
-- [ ] **Validar conectividad con GCS**
-- [ ] **Validar logs en Cloud Logging**
+### Fase 1: Finalización Actual (EN PROGRESO) ⏳
+- [x] Código funcional y validado
+- [x] Docker configurado y desplegado
+- [x] Scripts de despliegue optimizados
+- [x] Detección case-insensitive de IS_READY
+- [x] Procesamiento paralelo de PDFs
+- [ ] **Inicializar Firestore en GCP** (BLOCKEANTE)
+- [ ] **Probar persistencia de resultados**
+- [ ] **Validar logs en Firestore**
 
-### Fase 2: Integración con Servicios
-- [ ] Configurar service account con permisos GCS
-- [ ] Crear base de datos Firestore
-- [ ] Integrar funcionalidad de idempotencia
-- [ ] Subir PDFs de prueba a GCS
-- [ ] Validar procesamiento end-to-end
+### Fase 2: Mejoras Opcionales (POST-MVP)
+- [ ] Implementar Document AI real (reemplazar simuladores)
+- [ ] Entrenar modelos específicos por tipo de documento
+- [ ] Añadir más campos de extracción
+- [ ] Mejorar manejo de errores para casos edge
+- [ ] Agregar métricas de rendimiento
 
-### Fase 3: Document AI (Producción)
-- [ ] Reemplazar `simulate_classification()` con Document AI
-- [ ] Reemplazar `simulate_extraction()` con Document AI
-- [ ] Entrenar modelos para tipos de documentos
-- [ ] Validar precisión de clasificación/extracción
+### Fase 3: Producción (FUTURO)
+- [ ] Configurar alerting y monitoreo
+- [ ] Implementar autoscaling avanzado
+- [ ] Integrar con Cloud Workflows
+- [ ] Documentación de operaciones
+- [ ] SLA y runbooks
 
-### Fase 4: Orquestación (Producción)
-- [ ] Desplegar `workflow.yaml` a Cloud Workflows
-- [ ] Configurar autenticación OIDC
-- [ ] Integrar Workflow con backend principal
-- [ ] Configurar alertas y monitoreo
+## 📋 Cambios Recientes (2025-12-19)
 
-## 🧪 Cómo Probar AHORA
+### Implementado ✅
+- Detección **case-insensitive** de archivo IS_READY (ahora reconoce "IS_READY", "is_ready", etc.)
+- Exclusión automática del archivo IS_READY del procesamiento de PDFs
+- Skip de tests automáticos en `update_code.sh` para despliegues más rápidos
+- Documentación actualizada en QUICKSTART.md, ARCHITECTURE.md, TESTING.md
+- Validación exitosa con carpeta FUERZA (5 PDFs procesados correctamente)
+
+### En Progreso ⏳
+- Inicialización de Firestore (requiere acción manual en Cloud Console)
+
+## 🧪 Estado de Pruebas
 
 ### 1. Prueba Local (Sin desplegar)
 ```powershell

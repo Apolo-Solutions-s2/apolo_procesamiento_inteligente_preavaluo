@@ -4,14 +4,16 @@ Microservicio serverless para procesamiento inteligente de documentos financiero
 
 ## 📋 Descripción
 
-Este microservicio pertenece al módulo de preavalúos Apolo y ejecuta el procesamiento inteligente por carpeta de documentos financieros previamente estandarizados a PDF/A. Se activa automáticamente cuando se detecta un archivo bandera `is_ready` en Cloud Storage, procesando todos los PDFs en paralelo usando Document AI para clasificación y extracción estructurada.
+Este microservicio pertenece al módulo de preavalúos Apolo y ejecuta el procesamiento inteligente por carpeta de documentos financieros. Se activa automáticamente cuando se sube un archivo **IS_READY** a una carpeta en Cloud Storage, procesando todos los PDFs en esa carpeta en paralelo usando Document AI para clasificación y extracción estructurada.
 
 ### ✨ Características Principales
-- **Activación automática**: Trigger por Eventarc en eventos de GCS
-- **Procesamiento paralelo**: Múltiples documentos simultáneamente
+- **Activación automática**: Trigger por Eventarc al detectar archivo `IS_READY` (case-insensitive)
+- **Procesamiento por carpeta**: Procesa TODOS los PDFs en la carpeta donde se detecta `IS_READY`
+- **Procesamiento paralelo**: Múltiples documentos simultáneamente (max 8 concurrentes)
+- **Exclusión de archivos vacíos**: El archivo `IS_READY` se excluye automáticamente
 - **Idempotencia completa**: Por generación de GCS y estado de carpeta
 - **Persistencia trazable**: Esquema jerárquico en Firestore
-- **Manejo de errores**: Reintentos con backoff y DLQ
+- **Manejo de errores**: Reintentos con backoff exponencial y DLQ
 - **Observabilidad**: Logs estructurados en Cloud Logging
 
 ## 🏗️ Arquitectura
@@ -25,24 +27,41 @@ Este microservicio pertenece al módulo de preavalúos Apolo y ejecuta el proces
 
 ## 🚀 Inicio Rápido
 
-### Opción 1: Despliegue Automatizado (Recomendado)
+### Activación del Servicio
 
+1. **Sube archivos PDF a una carpeta en el bucket**:
+   ```bash
+   gsutil cp documento1.pdf gs://apolo-preavaluos-pdf-dev/MI-CARPETA/
+   gsutil cp documento2.pdf gs://apolo-preavaluos-pdf-dev/MI-CARPETA/
+   ```
+
+2. **Sube un archivo IS_READY (sin extensión, vacío) para activar el procesamiento**:
+   ```bash
+   echo -n "" > IS_READY
+   gsutil cp IS_READY gs://apolo-preavaluos-pdf-dev/MI-CARPETA/
+   ```
+
+3. **El microservicio se activa automáticamente**:
+   - Detecta el archivo `IS_READY` (mayúsculas/minúsculas - case-insensitive)
+   - Identifica la carpeta `MI-CARPETA`
+   - Procesa TODOS los PDFs en paralelo
+   - Excluye el archivo `IS_READY` (está vacío, solo es trigger)
+
+### Despliegue en Cloud Run
+
+**Desde Cloud Shell** (recomendado):
 ```bash
-# Desde Google Cloud Shell
-cd scripts
-./setup.sh TU_PROJECT_ID
-./deploy.sh dev TU_PROJECT_ID
+cd ~/apolo_procesamiento_inteligente_preavaluo/Cloud\ Shell
+./update_code.sh
 ```
 
-### Opción 2: Desarrollo Local con Docker
-
+**Primera vez (despliegue completo)**:
 ```bash
-# Construir imagen
-docker build -t apolo-processor .
-
-# Ejecutar localmente
-docker-compose up
+cd ~/apolo_procesamiento_inteligente_preavaluo/Cloud\ Shell
+./deploy.sh
 ```
+
+Más detalles en [Guía de Inicio Rápido](Documentation/QUICKSTART.md)
 
 ## 📁 Estructura del Proyecto
 
@@ -97,13 +116,14 @@ apolo_procesamiento_inteligente_preavaluo/
 
 | Componente | Estado | Notas |
 |------------|--------|-------|
-| **Código Python** | ✅ Completo | Idempotencia, logs específicos, procesamiento paralelo |
+| **Código Python** | ✅ Completo | Idempotencia, logs estructurados, procesamiento paralelo, detección case-insensitive IS_READY |
 | **Docker** | ✅ Completo | Imagen optimizada para Cloud Run |
 | **Terraform** | ✅ Completo | Infraestructura en us-south1 |
-| **Scripts** | ✅ Completo | Automatización para Cloud Shell |
-| **Documentación** | ✅ Completo | Actualizada con cambios recientes |
+| **Scripts Cloud Shell** | ✅ Completo | `deploy.sh` y `update_code.sh` con skip-tests |
+| **Documentación** | ✅ Actualizada | Incluye flujo IS_READY y cambios recientes (2025-12-19) |
 | **Diagramas** | ✅ Completo | Esquemas actualizados |
-| **Pruebas** | ⚠️ Pendiente | Scripts de test disponibles |
+| **Pruebas** | ✅ Disponible | `test_uuid_processing.sh` en Cloud Shell |
+| **Firestore** | ⏳ Pendiente | Inicializar en console.cloud.google.com |
 
 ## 🤝 Contribución
 
@@ -117,8 +137,14 @@ Este proyecto es parte del sistema Apolo de procesamiento de preavalúos.
 
 ---
 
-**Última actualización**: Diciembre 2025  
-**Versión**: 2.0.0  
+**Última actualización**: Diciembre 19, 2025  
+**Versión**: 2.1.0  
+**Cambios recientes**: 
+- ✅ Detección case-insensitive de archivo IS_READY
+- ✅ Exclusión automática del archivo IS_READY del procesamiento
+- ✅ Skip-tests en actualizaciones de código
+- 📋 Ver [CHANGELOG_RECENT.md](Documentation/CHANGELOG_RECENT.md) para detalles
+
 **Región**: us-south1
 └── requirements.txt          # Python dependencies
 ```
