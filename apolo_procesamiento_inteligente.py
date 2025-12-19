@@ -112,10 +112,10 @@ def _json_log(payload: Dict[str, Any]) -> None:
 
 
 def _is_ready_sentinel(object_name: str) -> Tuple[bool, str]:
-    """Valida si el objeto es un archivo sentinel 'is_ready' válido.
+    """Valida si el objeto es un archivo sentinel 'is_ready' válido (case-insensitive).
     
     Reglas:
-    - Debe terminar en '/is_ready' o ser exactamente 'is_ready'
+    - Debe terminar en '/is_ready' (ignorando mayúsculas/minúsculas) o ser exactamente 'is_ready'
     - Sin extensión
     
     Returns:
@@ -124,10 +124,11 @@ def _is_ready_sentinel(object_name: str) -> Tuple[bool, str]:
     if not object_name:
         return False, ""
     
-    if object_name.endswith("/is_ready"):
-        folder_prefix = object_name[:-9]  # Remove '/is_ready'
+    lower_name = object_name.lower()
+    if lower_name.endswith("/is_ready"):
+        folder_prefix = object_name[:-9]  # Remove '/is_ready' from original (preserving case)
         return True, folder_prefix
-    elif object_name == "is_ready":
+    elif lower_name == "is_ready":
         return True, ""
     
     return False, ""
@@ -169,6 +170,8 @@ def _publish_to_dlq(folio_id: str, gcs_uri: str, error_type: str, error_message:
 def _list_pdfs_in_folder(bucket_name: str, folder_prefix: str) -> List[Tuple[str, str]]:
     """Lista todos los PDFs en una carpeta de GCS con sus generation numbers.
     
+    Excluye el archivo 'is_ready' si está presente.
+    
     Returns:
         List[(blob_name, generation)]
     """
@@ -179,7 +182,8 @@ def _list_pdfs_in_folder(bucket_name: str, folder_prefix: str) -> List[Tuple[str
         
         pdfs = []
         for blob in blobs:
-            if blob.name.lower().endswith(".pdf") and not blob.name.endswith("/"):
+            blob_lower = blob.name.lower()
+            if blob_lower.endswith(".pdf") and not blob_lower.endswith("is_ready") and not blob.name.endswith("/"):
                 pdfs.append((blob.name, str(blob.generation)))
         
         return pdfs
