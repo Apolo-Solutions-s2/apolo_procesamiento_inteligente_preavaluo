@@ -101,10 +101,10 @@ print_status "Execute permissions set on all scripts"
 
 # Step 5: Redeploy
 print_header "Step 5: Redeploying Service"
-print_info "Starting deployment with --resume flag..."
+print_info "Starting deployment with --resume --skip-tests flags..."
 echo ""
 
-./deploy.sh --resume
+./deploy.sh --resume --skip-tests
 
 # Check exit code
 if [ $? -eq 0 ]; then
