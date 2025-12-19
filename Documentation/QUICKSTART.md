@@ -1,4 +1,31 @@
-# 🚀 Guía de Inicio Rápido - GCP Deployment
+# 🚀 Guía de Inicio Rápido - Apolo Document Processing
+
+## 📌 Activación por Archivo IS_READY
+
+El microservicio **apolo-procesamiento-inteligente** se activa automáticamente cuando se sube un archivo llamado **IS_READY** (sin extensión) a cualquier carpeta del bucket `apolo-preavaluos-pdf-dev`.
+
+### Proceso Automático:
+1. Subes archivos PDF a una carpeta (ej. `CARPETA-UUID/documento1.pdf`)
+2. Subes un archivo vacío llamado `IS_READY` a la misma carpeta (sin extensión)
+3. Eventarc detecta el archivo y activa el trigger automáticamente
+4. El microservicio procesa **TODOS los archivos PDF** de esa carpeta en paralelo
+5. El archivo `IS_READY` se excluye automáticamente del procesamiento (está vacío, solo sirve como señal)
+
+### Ejemplo de estructura:
+```
+gs://apolo-preavaluos-pdf-dev/
+├── CARPETA-1/
+│   ├── documento1.pdf    ✅ Procesado
+│   ├── documento2.pdf    ✅ Procesado
+│   └── IS_READY          ❌ No procesado (solo trigger)
+└── CARPETA-2/
+    ├── balance.pdf       ✅ Procesado
+    └── IS_READY          ❌ No procesado (solo trigger)
+```
+
+**Nota**: La detección de "IS_READY" es **case-insensitive**, por lo que funcionan: `IS_READY`, `is_ready`, `Is_Ready`, etc.
+
+---
 
 ## PARTE 1: Instalación de Requisitos (Solo una vez)
 

@@ -1,7 +1,103 @@
 # Guía Rápida de Pruebas
-# ======================
+
+## 📌 Flujo de Prueba Automático del Servicio
+
+El microservicio se prueba automáticamente durante el despliegue. El script `./test_uuid_processing.sh` en la carpeta `Cloud Shell/`:
+
+1. ✅ Crea una carpeta con UUID único
+2. ✅ Sube 2 PDFs de prueba
+3. ✅ Sube un archivo `is_ready` (minúsculas)
+4. ✅ Verifica que el microservicio procese los 2 PDFs
+5. ✅ Valida la estructura de carpetas y logs
+6. ✅ Limpia los recursos (opcional con `--cleanup`)
+
+**Nota**: Con el cambio a `update_code.sh`, estos tests se saltan por defecto durante actualizaciones de código. Puedes ejecutarlos manualmente con:
+```bash
+cd ~/apolo_procesamiento_inteligente_preavaluo/Cloud\ Shell
+./test_uuid_processing.sh
+```
+
+---
+
+## 🧪 Pruebas Manuales - Flujo Básico
+
+### 1. Sube archivos PDF a una carpeta
+```bash
+# En Cloud Shell, sube PDFs a una carpeta
+gsutil cp documento1.pdf gs://apolo-preavaluos-pdf-dev/MI-CARPETA/
+gsutil cp documento2.pdf gs://apolo-preavaluos-pdf-dev/MI-CARPETA/
+gsutil cp documento3.pdf gs://apolo-preavaluos-pdf-dev/MI-CARPETA/
+```
+
+### 2. Sube el archivo IS_READY para activar el trigger
+```bash
+# Crear archivo vacío (sin extensión)
+echo -n "" > IS_READY
+
+# Subir a la misma carpeta
+gsutil cp IS_READY gs://apolo-preavaluos-pdf-dev/MI-CARPETA/
+```
+
+### 3. Verifica los logs del microservicio
+```bash
+# Ver logs en tiempo real
+gcloud run services logs read apolo-procesamiento-inteligente \
+  --region=us-south1 \
+  --limit=50 \
+  --follow
+
+# Buscar eventos de tu carpeta
+gcloud logging read "resource.type=cloud_run_revision AND textPayload:MI-CARPETA" \
+  --limit=100 \
+  --format="table(timestamp,textPayload)"
+```
+
+### 4. Verifica los resultados en Firestore
+```bash
+# La estructura será:
+# folios/{folio_id}/documentos/{doc_id}/extracciones/{extraction_id}
+
+# Donde:
+# - folio_id = hash(bucket:MI-CARPETA) 
+# - doc_id = hash(folio_id:nombre_archivo:generation)
+```
+
+---
 
 ## 🧪 Pruebas Locales (Sin Desplegar)
+
+### 1. Ejecutar localmente con Docker
+```powershell
+# Construir imagen
+.\build-docker.ps1
+
+# Ejecutar (necesitas credentials.json)
+docker run -p 8080:8080 --rm `
+  -e GCP_PROJECT_ID=tu-proyecto-id `
+  -e GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json `
+  -v ${PWD}/credentials.json:/app/credentials.json:ro `
+  apolo-procesamiento-inteligente:local-latest
+
+# En otra terminal, probar
+.\test-cloudrun.ps1 -ServiceUrl "http://localhost:8080" -Mode individual
+.\test-cloudrun.ps1 -ServiceUrl "http://localhost:8080" -Mode batch
+```
+
+### 2. Ejecutar localmente con functions-framework (sin Docker)
+```powershell
+# Activar entorno virtual
+.\venv\Scripts\activate  # o: source venv/bin/activate en Linux
+
+# Configurar credenciales
+$env:GOOGLE_APPLICATION_CREDENTIALS = "path/to/credentials.json"
+$env:GCP_PROJECT_ID = "tu-proyecto-id"
+
+# Ejecutar
+functions-framework --target=process_folder_on_ready --debug --port=8080
+
+# En otra terminal, simular evento Eventarc (JSON en POST)
+# El servicio espera formato CloudEvent de Eventarc
+```
 
 ### 1. Ejecutar localmente con Docker
 ```powershell

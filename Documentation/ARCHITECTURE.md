@@ -70,6 +70,54 @@
 
 ## Data Flow - Processing Pipeline
 
+### Activation Trigger: IS_READY Sentinel File
+
+El servicio se activa automáticamente cuando se detecta un archivo `IS_READY` en GCS. Este es el flujo completo:
+
+```
+1. Usuario sube PDFs a carpeta del bucket
+   gs://apolo-preavaluos-pdf-dev/CARPETA-UUID/
+   ├── documento1.pdf
+   ├── documento2.pdf
+   └── documento3.pdf
+
+2. Usuario sube archivo IS_READY (sin extensión, vacío)
+   gs://apolo-preavaluos-pdf-dev/CARPETA-UUID/IS_READY
+
+3. Eventarc detecta evento 'object.finalize' en bucket
+   └─ Validación: ¿El nombre termina en 'is_ready' (case-insensitive)?
+   
+4. Trigger activa Cloud Run: apolo-procesamiento-inteligente
+   ├─ Extrae nombre de carpeta: CARPETA-UUID
+   ├─ Genera folio_id: hash(bucket:carpeta) para unicidad
+   └─ Inicia procesamiento de la carpeta
+   
+5. Listado de archivos PDF
+   ├─ Obtiene TODOS los PDFs en la carpeta
+   ├─ EXCLUYE el archivo IS_READY (no es PDF, está vacío)
+   └─ Encuentra N documentos para procesar
+   
+6. Procesamiento paralelo (ThreadPoolExecutor)
+   └─ Para cada PDF:
+      ├─ Validación PDF (verificar magic bytes %PDF-)
+      ├─ Clasificación con Document AI (ER/ESF/EFE)
+      ├─ Extracción de datos estructurados
+      ├─ Persistencia en Firestore (folio/docId/extraction)
+      └─ Manejo de errores y DLQ
+   
+7. Finalización
+   ├─ Actualiza estado del folio (DONE/DONE_WITH_ERRORS)
+   ├─ Registra estadísticas (total/exitosos/errores)
+   └─ Almacena en Firestore colección 'folios'
+```
+
+**Características importantes:**
+- ✅ **Case-insensitive**: Detecta "IS_READY", "is_ready", "Is_Ready", etc.
+- ✅ **Procesamiento paralelo**: Procesa múltiples PDFs simultáneamente
+- ✅ **Idempotencia**: Evita reprocesar documentos usando generation numbers
+- ✅ **Manejo de errores**: Publica errores al DLQ (Pub/Sub)
+- ✅ **Firestore integrado**: Persistencia automática de resultados
+
 ### Mode 1: Individual Document Processing
 ```
 1. Client Request (HTTP POST)
